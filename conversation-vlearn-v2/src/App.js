@@ -197,34 +197,22 @@ const MediaLibraryInterface = () => {
     const [apiResponses, setResponses] = useState([]);
     const [isGenerating, setIsGenerating] = useState(false);
     const [debugInfo, setDebugInfo] = useState('');
+    const [selectedActivityCard, setSelectedActivityCard] = useState(null);
+    const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+    const [expandedCards, setExpandedCards] = useState(new Set());
+    
+    // New state for current active AI response in voice mode
+    const [currentAIResponse, setCurrentAIResponse] = useState('');
 
     // Google Cloud Voice hooks
     const { isListening, transcript, startListening, stopListening, resetTranscript, error: sttError } = useGoogleSpeechToText();
-    const { speak, isSpeaking, error: ttsError } = useGoogleTextToSpeech();
+    const { speak, stop, isSpeaking, error: ttsError } = useGoogleTextToSpeech();
 
     const focusChoices = [
         { value: "Learning and Education", label: "Learning & Education", icon: <span role="img" aria-label="books">📚</span> },
         { value: "Creativity", label: "Creativity", icon: <span role="img" aria-label="art">🎨</span> },
         { value: "Emotion Intelligence", label: "Emotional Intelligence", icon: <span role="img" aria-label="heart">❤️</span> },
     ];
-
-    // Conversation starters
-    const conversationStarters = {
-        text: [
-            "What do you see in this picture?",
-            "Can you tell me about the colors in this image?", 
-            "What's your favorite thing in this picture?",
-            "What do you think is happening here?",
-            "Can you count the items you see?"
-        ],
-        voice: [
-            "Hi there! Let's talk about this picture together!",
-            "What catches your eye first in this image?",
-            "I see something interesting here, what do you notice?",
-            "Let's explore this picture together - what do you see?",
-            "This looks like a fun picture to discuss!"
-        ]
-    };
 
     // Load saved data on component mount
     useEffect(() => {
@@ -416,93 +404,131 @@ const MediaLibraryInterface = () => {
     };
 
     const conversation = () => {
+        console.log('🔄 Switching to conversation mode - clearing all state');
         setResponses([]);
         setMode('conversation');
         setConversationType('text');
         setInput('');
+        setCurrentAIResponse(''); // Clear current AI response
+        setShowChatHistory(false); // Reset chat history visibility
+        resetTranscript(); // Clear any existing transcript when switching modes
     };
 
     const suggestion = () => {
         setResponses([]);
         setMode('suggestion');
         setInput('');
+        setCurrentAIResponse(''); // Clear current AI response
+        setShowChatHistory(false); // Reset chat history visibility
+        setExpandedCards(new Set()); // Reset expanded cards when switching to suggestion mode
     };
 
     // Voice recording functions with improved flow
     const startRecording = async () => {
+        console.log('🎤 Starting new recording - clearing all previous state');
+        // Completely clear all previous state before starting new recording
         resetTranscript();
-        await startListening();
+        setInput('');
+        setCurrentAIResponse(''); // Clear current AI response when starting to record
+        // Add a small delay to ensure state is cleared
+        setTimeout(async () => {
+            await startListening();
+        }, 100);
     };
 
     const stopRecording = async () => {
+        console.log('🎤 Stopping current recording');
         stopListening();
         // Note: transcript will be processed in useEffect below
     };
 
-    // Auto-send voice transcript when it's ready
+    // Handle voice transcript - add to conversation but don't auto-send
     useEffect(() => {
-        if (transcript && conversationType === 'voice' && !isListening && !isGenerating) {
-            // Auto-send the transcript to Gemini after a short delay
-            const timer = setTimeout(() => {
-                if (transcript && !isGenerating) {
-                    getApiResponse(transcript);
-                }
-            }, 1000); // 1 second delay to allow user to see transcript
-
-            return () => clearTimeout(timer);
+        console.log('🎤 Transcript useEffect triggered:', { transcript, conversationType, isListening });
+        if (transcript && conversationType === 'voice' && !isListening) {
+            console.log('🎤 Setting input to new transcript:', transcript);
+            // Only update input field when recording is complete and we have a new transcript
+            setInput(transcript);
         }
-    }, [transcript, conversationType, isListening, isGenerating]);
+    }, [transcript, conversationType, isListening]);
 
     const playResponse = (text) => {
+        setCurrentAIResponse(text); // Set the current AI response being played
         speak(text);
     };
 
-    // Update input when transcript changes
+    // Clear current AI response when speaking finishes
     useEffect(() => {
-        if (transcript && conversationType === 'voice') {
-            setInput(transcript);
+        if (!isSpeaking && currentAIResponse) {
+            // Small delay to ensure smooth transition
+            setTimeout(() => {
+                setCurrentAIResponse('');
+            }, 500);
         }
-    }, [transcript, conversationType]);
-    
-    // Function to use conversation starter
-    const handleConversationStarter = (starter) => {
-        if (conversationType === 'text') {
-            setInput(starter);
+    }, [isSpeaking, currentAIResponse]);
+
+    // Function to toggle card description expansion
+    const toggleCardExpansion = (cardIndex) => {
+        const newExpanded = new Set(expandedCards);
+        if (newExpanded.has(cardIndex)) {
+            newExpanded.delete(cardIndex);
         } else {
-            // For voice mode, directly send the starter
-            getApiResponse(starter);
+            newExpanded.add(cardIndex);
         }
+        setExpandedCards(newExpanded);
+    };
+
+    // Function to truncate text
+    const truncateText = (text, maxLength = 120) => {
+        if (text.length <= maxLength) return text;
+        return text.substring(0, maxLength) + '...';
     };
 
     // Function to parse suggestions into cards
     const parseSuggestionCards = (text) => {
-        // Try to extract activity suggestions from the text
-        const lines = text.split('\n').filter(line => line.trim());
+        // Clean the text by removing markdown formatting and emojis
+        const cleanText = text
+            .replace(/\*\*/g, '') // Remove bold markdown
+            .replace(/\*/g, '')   // Remove italic markdown
+            .replace(/#{1,6}\s*/g, '') // Remove headers
+            .replace(/[\u{1F600}-\u{1F64F}]|[\u{1F300}-\u{1F5FF}]|[\u{1F680}-\u{1F6FF}]|[\u{1F1E0}-\u{1F1FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]/gu, ''); // Remove emojis
+        
+        const lines = cleanText.split('\n').filter(line => line.trim());
         const cards = [];
         
         let currentCard = null;
         
         for (let line of lines) {
-            // Skip headers and empty lines
-            if (line.startsWith('#') || line.trim() === '') continue;
+            line = line.trim();
+            if (!line) continue;
             
-            // Look for activity titles (usually start with numbers or **bold**)
-            if (line.match(/^\*\*\d+\.\s*(.+?)\*\*/) || line.match(/^\d+\.\s*\*\*(.+?)\*\*/)) {
+            // Look for activity titles (Activity 1:, Activity 2:, etc.)
+            if (line.match(/^Activity\s+\d+:/i)) {
                 // Save previous card if exists
                 if (currentCard) {
                     cards.push(currentCard);
                 }
                 
-                // Extract title
-                const titleMatch = line.match(/\*\*(.+?)\*\*/) || [null, line.replace(/^\d+\.\s*/, '')];
+                // Extract title (everything after "Activity X:")
+                const titleMatch = line.match(/^Activity\s+\d+:\s*(.+)/i);
                 currentCard = {
-                    title: titleMatch[1] || 'Activity',
-                    description: '',
-                    icon: getActivityIcon(titleMatch[1] || 'Activity')
+                    title: titleMatch ? titleMatch[1].trim() : line.replace(/^Activity\s+\d+:\s*/i, ''),
+                    description: ''
                 };
             } else if (currentCard && line.trim()) {
                 // Add to description
                 currentCard.description += (currentCard.description ? ' ' : '') + line.trim();
+            } else if (line.match(/^\d+\.\s*(.+)/) || line.match(/^-\s*(.+)/)) {
+                // Handle numbered or bulleted lists as activities
+                if (currentCard) {
+                    cards.push(currentCard);
+                }
+                
+                const titleMatch = line.match(/^[\d-]+\.\s*(.+)/) || line.match(/^-\s*(.+)/);
+                currentCard = {
+                    title: titleMatch ? titleMatch[1].trim() : line.trim(),
+                    description: ''
+                };
             }
         }
         
@@ -511,31 +537,35 @@ const MediaLibraryInterface = () => {
             cards.push(currentCard);
         }
         
-        // If no cards found, create generic ones
+        // If no structured activities found, try to split by paragraphs
+        if (cards.length === 0) {
+            const paragraphs = cleanText.split('\n\n').filter(p => p.trim());
+            paragraphs.forEach((paragraph, index) => {
+                if (paragraph.trim()) {
+                    const sentences = paragraph.trim().split('. ');
+                    const title = sentences[0] || `Activity ${index + 1}`;
+                    const description = sentences.slice(1).join('. ') || sentences[0];
+                    
+                    cards.push({
+                        title: title.replace(/[.:]$/, ''),
+                        description: description
+                    });
+                }
+            });
+        }
+        
+        // Ensure we have at least some cards
         if (cards.length === 0) {
             return [
                 {
                     title: "Creative Activity",
-                    description: text.substring(0, 200) + (text.length > 200 ? '...' : ''),
-                    icon: "🎨"
+                    description: cleanText.substring(0, 200) + (cleanText.length > 200 ? '...' : '')
                 }
             ];
         }
         
-        return cards;
-    };
-
-    const getActivityIcon = (title) => {
-        const titleLower = title.toLowerCase();
-        if (titleLower.includes('spy') || titleLower.includes('find') || titleLower.includes('look')) return "👁️";
-        if (titleLower.includes('color') || titleLower.includes('paint')) return "🎨";
-        if (titleLower.includes('count') || titleLower.includes('number')) return "🔢";
-        if (titleLower.includes('story') || titleLower.includes('tell')) return "📖";
-        if (titleLower.includes('move') || titleLower.includes('dance')) return "💃";
-        if (titleLower.includes('sound') || titleLower.includes('music')) return "🎵";
-        if (titleLower.includes('draw') || titleLower.includes('create')) return "✏️";
-        if (titleLower.includes('missing') || titleLower.includes('imagine')) return "❓";
-        return "🌟";
+        // Limit to 6 cards maximum
+        return cards.slice(0, 6);
     };
     
     //converts image to pass into gemini with error handling
@@ -631,9 +661,16 @@ const MediaLibraryInterface = () => {
                 }
                 
                 if (apiResponses.length === 0) {
-                    prompt = `Begin a conversation about activities that can be found within this image, taking into consideration the child's age: ${age} years old, and the focus: ${focus}. 
+                    prompt = `Begin a conversation about this image specifically focused on ${focus} for a ${age}-year-old child. 
                     
-                    Please start with a warm greeting and ask an engaging question about what they see in the image. Keep the conversation interactive and educational.`;
+                    IMPORTANT: Your conversation must be directly related to ${focus}. 
+                    
+                    For example:
+                    - If focus is "Learning and Education": Ask about educational aspects, counting, letters, learning opportunities
+                    - If focus is "Creativity": Ask about imagination, art, creative expression, what they could create
+                    - If focus is "Emotional Intelligence": Ask about feelings, emotions, how characters might feel, emotional responses
+                    
+                    Start with a warm greeting and ask an engaging question that specifically relates to ${focus} based on what you see in the image. Keep the conversation interactive and educational within the ${focus} theme.`;
                 } else {
                     const conversationHistory = apiResponses.map(r => {
                         const isUser = r.type === 'user_message' || r.sender === 'user';
@@ -641,7 +678,9 @@ const MediaLibraryInterface = () => {
                         return isUser ? `Child: ${content}` : `Assistant: ${content}`;
                     }).join('\n\n');
                     
-                    prompt = `Continue this conversation about the image. 
+                    prompt = `Continue this conversation about the image with a strong focus on ${focus} for a ${age}-year-old child.
+                    
+                    IMPORTANT: Keep the conversation centered on ${focus}. Every response should relate to this focus area.
                     
                     Previous conversation:
                     ${conversationHistory}
@@ -651,26 +690,40 @@ const MediaLibraryInterface = () => {
                     Child's age: ${age} years old
                     Focus: ${focus}
                     
-                    Please respond naturally and keep the conversation engaging and educational.`;
+                    Please respond naturally while keeping the conversation engaging, educational, and specifically focused on ${focus}.`;
                 }
             } else {
-                prompt = `Create engaging activity suggestions based on this image for a ${age}-year-old child with a focus on ${focus}. 
+                prompt = `Create 4-6 engaging activity suggestions based on this image for a ${age}-year-old child with a PRIMARY focus on ${focus}. 
                 
-                Please format EXACTLY as follows:
+                IMPORTANT: All activities must be directly related to ${focus}:
+                
+                - If focus is "Learning and Education": Activities should teach concepts like counting, letters, shapes, colors, problem-solving, observation skills
+                - If focus is "Creativity": Activities should involve imagination, artistic expression, creative storytelling, building, drawing, role-playing
+                - If focus is "Emotional Intelligence": Activities should help identify emotions, discuss feelings, understand character emotions, practice empathy, emotional expression
+                
+                Please provide exactly 4-6 activities that specifically target ${focus} using what you see in the image. Each activity should be age-appropriate for ${age} years old.
+                
+                Format each activity with a clear title and detailed description. Use this exact format:
 
-                **1. I Spy Game**
-                Play 'I spy with my little eye' using things in the picture!
+                Activity 1: [Title focused on ${focus}]
+                [Detailed description that specifically develops ${focus} skills]
 
-                **2. Color Hunt**
-                Find and name all the different colors you can see!
+                Activity 2: [Title focused on ${focus}]  
+                [Detailed description that specifically develops ${focus} skills]
 
-                **3. Count Together**
-                Count how many things you can find in the picture!
+                Activity 3: [Title focused on ${focus}]
+                [Detailed description that specifically develops ${focus} skills]
 
-                **4. What's Missing?**
-                Imagine what might be just outside the picture!
+                Activity 4: [Title focused on ${focus}]
+                [Detailed description that specifically develops ${focus} skills]
 
-                Make sure each activity is age-appropriate and aligns with the focus area. Always include these 4 specific activities formatted exactly as shown.`;
+                Activity 5: [Title focused on ${focus}]
+                [Detailed description that specifically develops ${focus} skills]
+
+                Activity 6: [Title focused on ${focus}]
+                [Detailed description that specifically develops ${focus} skills]
+
+                Do not use any special formatting marks, bold text, asterisks, or emojis. Keep the language clear and simple. Every activity must clearly relate to ${focus}.`;
             }
             
             console.log('🤖 Sending request to Gemini...');
@@ -701,8 +754,14 @@ const MediaLibraryInterface = () => {
                 
                 setResponses(prev => [...prev, newResponse]);
                 
-                // Auto-play response in voice mode
-                if (conversationType === 'voice') {
+                // Reset expanded cards for new suggestions
+                if (mode === 'suggestion') {
+                    setExpandedCards(new Set());
+                }
+                
+                // Auto-play response only in voice conversation mode, not for suggestions
+                if (conversationType === 'voice' && mode === 'conversation') {
+                    setCurrentAIResponse(text); // Set current AI response
                     speak(text);
                 }
             } else {
@@ -712,6 +771,7 @@ const MediaLibraryInterface = () => {
             }
             
             setInput('');
+            resetTranscript(); // Also reset transcript after successful API call
             
         } catch (error) {
             console.error('❌ Gemini API Error:', error);
@@ -724,6 +784,8 @@ const MediaLibraryInterface = () => {
 
     const clearConversations = () => {
         setResponses([]);
+        setCurrentAIResponse(''); // Clear current AI response
+        setShowChatHistory(false); // Reset chat history visibility
         localStorage.removeItem('ai-media-conversations');
         setDebugInfo('Conversations cleared');
     };
@@ -732,9 +794,252 @@ const MediaLibraryInterface = () => {
         setResponses([]);
         setMediaFiles([]);
         setSelectedMedia(null);
+        setCurrentAIResponse(''); // Clear current AI response
+        setShowChatHistory(false); // Reset chat history visibility
         localStorage.removeItem('ai-media-conversations');
         localStorage.removeItem('ai-media-files');
         setDebugInfo('All data cleared');
+    };
+
+    // New state for managing chat history visibility in voice mode
+    const [showChatHistory, setShowChatHistory] = useState(false);
+
+    // Function to render chat history
+    const renderChatHistory = () => {
+        return (
+            <div className="space-y-3">
+                {apiResponses.map((response, index) => (
+                    <div key={response.responseId || index}>
+                        {response.type === 'user_message' || response.sender === 'user' ? (
+                            // User Message - Right aligned, blue
+                            <div className="flex justify-end mb-2">
+                                <div className="bg-blue-500 text-white rounded-2xl rounded-br-md px-4 py-2 max-w-xs shadow-sm">
+                                    <div className="text-sm font-medium mb-1">You</div>
+                                    <div className="text-sm">
+                                        {response.candidates?.[0]?.content?.parts?.[0]?.text || response.content}
+                                    </div>
+                                    <div className="text-xs opacity-75 mt-1">
+                                        {new Date(response.responseId || Date.now()).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                    </div>
+                                </div>
+                            </div>
+                        ) : (
+                            // AI Message - Left aligned, gray
+                            <div className="flex justify-start mb-2">
+                                <div className="bg-gray-100 text-gray-800 rounded-2xl rounded-bl-md px-4 py-2 max-w-sm shadow-sm">
+                                    <div className="text-sm font-medium mb-1 text-purple-600">AI Assistant</div>
+                                    <div className="text-sm prose prose-sm max-w-none">
+                                        {response.candidates?.[0]?.content?.parts?.[0]?.text || response.content}
+                                    </div>
+                                    <div className="flex items-center justify-between mt-2">
+                                        <div className="text-xs text-gray-500">
+                                            {new Date(response.responseId || Date.now()).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                        </div>
+                                        <button
+                                            onClick={() => playResponse(response.candidates?.[0]?.content?.parts?.[0]?.text || response.content)}
+                                            disabled={isSpeaking}
+                                            className="ml-2 flex items-center gap-1 text-xs text-purple-600 hover:text-purple-700 disabled:text-gray-400"
+                                        >
+                                            <Volume2 className="w-3 h-3" />
+                                            {isSpeaking ? 'Playing...' : 'Play'}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                ))}
+                {isGenerating && (
+                    <div className="flex justify-start mb-2">
+                        <div className="bg-gray-100 text-gray-800 rounded-2xl rounded-bl-md px-4 py-2 max-w-xs shadow-sm">
+                            <div className="flex items-center gap-2 text-gray-500">
+                                <div className="animate-spin w-4 h-4 border-2 border-purple-600 border-t-transparent rounded-full"></div>
+                                <span className="text-sm">AI is thinking...</span>
+                            </div>
+                        </div>
+                    </div>
+                )}
+            </div>
+        );
+    };
+
+    // Function to render current voice transcript
+    const renderCurrentVoiceTranscript = () => {
+        return (
+            <div className="space-y-4">
+                {/* Current AI Response (when AI is speaking) */}
+                {isSpeaking && currentAIResponse && (
+                    <div className="w-full">
+                        <div className="bg-gradient-to-r from-purple-100 to-blue-100 rounded-2xl p-4 shadow-sm border border-purple-200">
+                            <div className="flex items-center gap-2 mb-2">
+                                <div className="w-3 h-3 bg-purple-500 rounded-full animate-pulse"></div>
+                                <span className="text-sm font-medium text-purple-700">AI Assistant Speaking</span>
+                            </div>
+                            <div className="text-gray-800 leading-relaxed text-sm">
+                                {currentAIResponse}
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* Current User Transcript (when user is recording or has recorded) */}
+                {(isListening || (transcript && !isSpeaking && !isGenerating)) && (
+                    <div className="w-full">
+                        <div className="bg-gradient-to-r from-blue-100 to-green-100 rounded-2xl p-4 shadow-sm border border-blue-200">
+                            <div className="flex items-center gap-2 mb-2">
+                                {isListening ? (
+                                    <>
+                                        <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse"></div>
+                                        <span className="text-sm font-medium text-red-700">Recording...</span>
+                                    </>
+                                ) : (
+                                    <>
+                                        <div className="w-3 h-3 bg-blue-500 rounded-full"></div>
+                                        <span className="text-sm font-medium text-blue-700">Your Message</span>
+                                    </>
+                                )}
+                            </div>
+                            <div className="text-gray-800 leading-relaxed text-sm">
+                                {isListening ? 
+                                    "🎤 Listening... Speak now!" : 
+                                    (transcript || "No speech detected")
+                                }
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* AI Thinking State */}
+                {isGenerating && !isSpeaking && (
+                    <div className="w-full">
+                        <div className="bg-gradient-to-r from-gray-100 to-purple-100 rounded-2xl p-4 shadow-sm border border-gray-200">
+                            <div className="flex items-center gap-2 mb-2">
+                                <div className="animate-spin w-4 h-4 border-2 border-purple-600 border-t-transparent rounded-full"></div>
+                                <span className="text-sm font-medium text-purple-700">AI is thinking...</span>
+                            </div>
+                            <div className="text-gray-600 text-sm">
+                                Processing your message and preparing a response...
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* Default state when nothing is happening */}
+                {!isListening && !transcript && !isSpeaking && !isGenerating && apiResponses.length > 0 && (
+                    <div className="text-center text-gray-500 py-4">
+                        <MessageCircle className="w-8 h-8 mx-auto mb-2 text-gray-300" />
+                        <p className="text-sm">Ready for your next message</p>
+                        <p className="text-xs text-gray-400">Press the microphone to continue chatting</p>
+                    </div>
+                )}
+            </div>
+        );
+    };
+
+    // Function to render the conversation content based on mode and type
+    const renderConversationContent = () => {
+        if (!selectedMedia) {
+            return (
+                <div className="flex flex-col items-center justify-center h-full text-gray-500">
+                    <MessageCircle className="w-16 h-16 mb-4 text-gray-300" />
+                    <p className="text-lg font-medium">Select an image to begin</p>
+                    <p className="text-sm text-center">Choose an image from the library to start exploring activities</p>
+                </div>
+            );
+        }
+
+        if (apiResponses.length === 0 && !isGenerating) {
+            return (
+                <div className="flex flex-col items-center justify-center h-full text-gray-500">
+                    {mode === 'conversation' ? (
+                        <>
+                            <MessageCircle className="w-16 h-16 mb-4 text-gray-300" />
+                            <p className="text-lg font-medium">Ready to chat!</p>
+                            <p className="text-sm text-center">Click "Start" to begin your {focus.toLowerCase()} conversation</p>
+                        </>
+                    ) : (
+                        <>
+                            <Lightbulb className="w-16 h-16 mb-4 text-gray-300" />
+                            <p className="text-lg font-medium">Generate suggestions</p>
+                            <p className="text-sm text-center">Click "Generate Suggestions" to get {focus.toLowerCase()} activity ideas</p>
+                        </>
+                    )}
+                </div>
+            );
+        }
+
+        if (mode === 'conversation') {
+            // Show chat history for both text and voice modes
+            return renderChatHistory();
+        } else {
+            // Suggestion Mode - Card Layout
+            return (
+                <div className="w-full">
+                    {apiResponses.length > 0 && (() => {
+                        const lastResponse = apiResponses[apiResponses.length - 1];
+                        const responseText = lastResponse.candidates?.[0]?.content?.parts?.[0]?.text || '';
+                        const suggestionCards = parseSuggestionCards(responseText);
+                        
+                        return (
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                {suggestionCards.map((card, index) => {
+                                    const isExpanded = expandedCards.has(index);
+                                    const shouldTruncate = card.description.length > 120;
+                                    const displayDescription = isExpanded || !shouldTruncate 
+                                        ? card.description 
+                                        : truncateText(card.description);
+                                    
+                                    return (
+                                        <div key={index} className="bg-gradient-to-br from-blue-50 to-purple-50 rounded-xl p-3 border border-gray-200 hover:shadow-md transition-all duration-200 cursor-pointer"
+                                            onClick={() => setSelectedActivityCard(card)}>
+                                            <div className="mb-2">
+                                                <h3 className="font-semibold text-blue-600 text-base mb-1">{card.title}</h3>
+                                            </div>
+                                            <p className="text-gray-700 text-sm leading-relaxed mb-2">
+                                                {displayDescription}
+                                            </p>
+                                            {shouldTruncate && (
+                                                <button
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        toggleCardExpansion(index);
+                                                    }}
+                                                    className="text-xs text-blue-600 hover:text-blue-700 mb-2 font-medium"
+                                                >
+                                                    {isExpanded ? 'Show less' : 'Show more'}
+                                                </button>
+                                            )}
+                                            <div className="flex justify-between items-center">
+                                                <button
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        playResponse(card.title + ". " + card.description);
+                                                    }}
+                                                    disabled={isSpeaking}
+                                                    className="flex items-center gap-1 text-xs text-purple-600 hover:text-purple-700 disabled:text-gray-400 bg-white/50 hover:bg-white/80 px-2 py-1 rounded-lg transition-all"
+                                                >
+                                                    <Volume2 className="w-3 h-3" />
+                                                    {isSpeaking ? 'Playing...' : 'Play'}
+                                                </button>
+                                                <span className="text-xs text-gray-500">Click to enlarge</span>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        );
+                    })()}
+                    {isGenerating && (
+                        <div className="bg-gray-50 rounded-xl p-4">
+                            <div className="flex items-center gap-2 text-gray-500">
+                                <div className="animate-spin w-4 h-4 border-2 border-purple-600 border-t-transparent rounded-full"></div>
+                                Generating {focus.toLowerCase()} suggestions...
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
     };
 
     return (
@@ -767,449 +1072,312 @@ const MediaLibraryInterface = () => {
                 </div>
             </div>
 
-            <div className="max-w-7xl mx-auto p-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
-                
-                {/* Left Panel - Media Library */}
-                <div className="lg:col-span-1 space-y-6">
-                    
-                    {/* Upload Section */}
-                    <div className="bg-white rounded-2xl shadow-lg p-6 border border-gray-100">
-                        <h2 className="text-xl font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                            <Upload className="w-5 h-5 text-purple-600" />
-                            Upload Media
-                        </h2>
-                        
-                        <label className="relative group cursor-pointer">
-                            <div className="border-2 border-dashed border-purple-300 rounded-xl p-8 text-center transition-all duration-200 hover:border-purple-400 hover:bg-purple-50 group-hover:scale-[1.02]">
-                                <Plus className="w-12 h-12 text-purple-400 mx-auto mb-3" />
-                                <p className="text-purple-600 font-medium">Click to upload images</p>
-                                <p className="text-sm text-gray-500 mt-1">PNG, JPG, GIF up to 10MB</p>
-                            </div>
-                            <input 
-                                type="file" 
-                                accept="image/*" 
-                                multiple 
-                                onChange={uploadMedia}
-                                className="hidden"
-                            />
-                        </label>
-                    </div>
-
-                    {/* Media Library */}
-                    <div className="bg-white rounded-2xl shadow-lg p-6 border border-gray-100">
-                        <div className="flex items-center justify-between mb-4">
-                            <h2 className="text-xl font-semibold text-gray-900 flex items-center gap-2">
-                                <Camera className="w-5 h-5 text-purple-600" />
-                                Media Library
-                                <span className="bg-purple-100 text-purple-700 text-xs px-2 py-1 rounded-full ml-auto">
-                                    {mediaFiles.length}
-                                </span>
-                            </h2>
-                        </div>
-                        
-                        {mediaFiles.length === 0 ? (
-                            <div className="text-center py-8 text-gray-500">
-                                <Camera className="w-12 h-12 mx-auto mb-3 text-gray-300" />
-                                <p>No images uploaded yet</p>
-                                <p className="text-xs mt-1">Image metadata persists after refresh, but files need re-upload for AI analysis</p>
-                            </div>
-                        ) : (
-                            <div className="grid grid-cols-2 gap-3">
-                                {mediaFiles.map((file) => (
-                                    <div 
-                                        key={file.id} 
-                                        className={`relative group cursor-pointer rounded-xl overflow-hidden transition-all duration-200 ${
-                                            selectedMedia?.id === file.id 
-                                                ? 'ring-4 ring-purple-400 ring-offset-2 scale-105' 
-                                                : 'hover:scale-105'
-                                        } ${file.needsReupload ? 'opacity-50' : ''}`}
-                                        onClick={() => !file.needsReupload && selectMedia(file)}
+            {/* Main Content Area */}
+            <div className={`max-w-7xl mx-auto p-4 transition-all duration-300 ${
+                sidebarCollapsed ? 'pb-4' : 'pb-4'
+            }`}>
+                {/* Voice Mode Layout - Image Top, Controls Below */}
+                {mode === 'conversation' && conversationType === 'voice' ? (
+                    <div className="space-y-4 h-[calc(100vh-8rem)]">
+                        {/* Header with Toggle */}
+                        <div className="bg-white rounded-2xl shadow-lg border border-gray-100 p-4">
+                            <div className="flex justify-between items-center">
+                                <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                                    <MessageCircle className="w-5 h-5 text-purple-600" />
+                                    AI Voice Conversation
+                                </h2>
+                                <div className="flex items-center gap-4">
+                                    {selectedMedia && (
+                                        <div className="text-xs text-gray-600">
+                                            <span className="font-medium">Age:</span> {age} | <span className="font-medium">Focus:</span> {focus}
+                                        </div>
+                                    )}
+                                    <button
+                                        onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+                                        className="flex items-center gap-2 px-3 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg text-sm font-medium transition-all duration-200"
                                     >
-                                        <img 
-                                            src={file.url} 
-                                            alt={file.name} 
-                                            className="w-full h-24 object-cover"
-                                        />
-                                        {file.needsReupload && (
-                                            <div className="absolute inset-0 bg-red-500 bg-opacity-20 flex items-center justify-center">
-                                                <div className="text-xs text-red-700 font-bold text-center p-1">
-                                                    Re-upload needed
-                                                </div>
-                                            </div>
+                                        {sidebarCollapsed ? (
+                                            <>
+                                                <Settings className="w-4 h-4" />
+                                                Settings
+                                            </>
+                                        ) : (
+                                            <>
+                                                <X className="w-4 h-4" />
+                                                Hide Settings
+                                            </>
                                         )}
-                                        <div className="absolute inset-0 bg-black bg-opacity-0 group-hover:bg-opacity-30 transition-all duration-200 flex items-center justify-center">
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 flex-1">
+                            {/* Large Image */}
+                            <div className="lg:col-span-2 bg-white rounded-2xl shadow-lg border border-gray-100 flex flex-col">
+                                <div className="p-4 border-b border-gray-200">
+                                    <h3 className="text-lg font-semibold text-gray-900">Selected Image</h3>
+                                </div>
+                                <div className="flex-1 p-4">
+                                    {selectedMedia ? (
+                                        <>
+                                            <div className="h-full rounded-xl overflow-hidden bg-gray-50 flex items-center justify-center">
+                                                <img 
+                                                    src={selectedMedia.url} 
+                                                    alt={selectedMedia.name}
+                                                    className="w-full h-full object-contain max-h-[60vh]"
+                                                />
+                                            </div>
+                                            <div className="mt-3">
+                                                <p className="text-sm text-gray-600 truncate">{selectedMedia.name}</p>
+                                                {selectedMedia.needsReupload && (
+                                                    <div className="mt-2 p-2 bg-orange-50 border border-orange-200 rounded text-xs text-orange-700">
+                                                        <span role="img" aria-label="warning">⚠️</span> This image needs to be re-uploaded for AI analysis
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </>
+                                    ) : (
+                                        <div className="h-full flex flex-col items-center justify-center text-gray-500">
+                                            <Camera className="w-16 h-16 mb-4 text-gray-300" />
+                                            <p className="text-lg font-medium">No Image Selected</p>
+                                            <p className="text-sm text-center">Upload and select an image to get started</p>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+
+                            {/* Voice Controls & Current Transcript */}
+                            <div className="bg-white rounded-2xl shadow-lg border border-gray-100 flex flex-col">
+                                <div className="p-4 border-b border-gray-200">
+                                    <div className="flex items-center justify-between">
+                                        <h3 className="text-lg font-semibold text-gray-900">Voice Chat</h3>
+                                        {apiResponses.length > 0 && (
                                             <button
-                                                onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    deleteMedia(file.id);
-                                                }}
-                                                className="opacity-0 group-hover:opacity-100 transition-opacity bg-red-500 hover:bg-red-600 text-white p-2 rounded-full"
+                                                onClick={() => setShowChatHistory(!showChatHistory)}
+                                                className="flex items-center gap-2 px-3 py-1 bg-blue-100 hover:bg-blue-200 text-blue-700 rounded-lg text-sm font-medium transition-all duration-200"
                                             >
-                                                <Trash2 className="w-4 h-4" />
+                                                <Eye className="w-4 h-4" />
+                                                {showChatHistory ? 'Hide History' : 'Show History'}
                                             </button>
+                                        )}
+                                    </div>
+                                </div>
+
+                                {/* Error Display */}
+                                {(sttError || ttsError) && (
+                                    <div className="mx-4 mt-4 bg-red-50 border border-red-200 rounded-xl p-3">
+                                        <div className="flex items-center gap-2 text-red-800 mb-1">
+                                            <AlertCircle className="w-4 h-4" />
+                                            <h3 className="font-medium text-sm">Voice Service Errors</h3>
+                                        </div>
+                                        {sttError && <p className="text-xs text-red-600">Speech-to-Text: {sttError}</p>}
+                                        {ttsError && <p className="text-xs text-red-600">Text-to-Speech: {ttsError}</p>}
+                                    </div>
+                                )}
+
+                                {/* Current Transcript Area */}
+                                <div className="flex-1 p-4">
+                                    {showChatHistory && apiResponses.length > 0 ? (
+                                        <div className="h-full overflow-y-auto">
+                                            {renderChatHistory()}
+                                        </div>
+                                    ) : (
+                                        renderCurrentVoiceTranscript()
+                                    )}
+                                </div>
+
+                                {/* Voice Controls */}
+                                <div className="p-4 border-t border-gray-200">
+                                    <div className="space-y-3">
+                                        <div className="flex flex-col items-center gap-3">
+                                            <button
+                                                onClick={isListening ? stopRecording : startRecording}
+                                                disabled={isGenerating || !selectedMedia || isSpeaking}
+                                                className={`w-full px-6 py-4 rounded-xl font-medium transition-all duration-200 flex items-center justify-center gap-3 ${
+                                                    isListening 
+                                                        ? 'bg-red-600 hover:bg-red-700 text-white animate-pulse' 
+                                                        : 'bg-purple-600 hover:bg-purple-700 text-white'
+                                                } disabled:bg-gray-400`}
+                                            >
+                                                {isListening ? (
+                                                    <>
+                                                        <MicOff className="w-5 h-5" />
+                                                        Stop Recording
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <Mic className="w-5 h-5" />
+                                                        {transcript ? 'Record New' : (apiResponses.length === 0 ? 'Start Voice Chat' : 'Record Message')}
+                                                    </>
+                                                )}
+                                            </button>
+                                            
+                                            {/* Action buttons row */}
+                                            <div className="flex gap-2 w-full">
+                                                {/* Send button for voice mode */}
+                                                {transcript && !isListening && !isGenerating && (
+                                                    <button
+                                                        onClick={() => {
+                                                            console.log('🎤 Sending message and clearing state');
+                                                            getApiResponse();
+                                                            resetTranscript();
+                                                            setInput('');
+                                                        }}
+                                                        className="flex-1 px-4 py-3 bg-green-600 hover:bg-green-700 text-white rounded-xl font-medium transition-all duration-200 flex items-center justify-center gap-2"
+                                                    >
+                                                        <Send className="w-4 h-4" />
+                                                        Send
+                                                    </button>
+                                                )}
+                                                
+                                                {/* Stop AI speaking button */}
+                                                {isSpeaking && (
+                                                    <button
+                                                        onClick={stop}
+                                                        className="flex-1 px-4 py-3 bg-red-600 hover:bg-red-700 text-white rounded-xl font-medium transition-all duration-200 flex items-center justify-center gap-2"
+                                                    >
+                                                        <X className="w-4 h-4" />
+                                                        Stop AI
+                                                    </button>
+                                                )}
+                                            </div>
                                         </div>
                                     </div>
-                                ))}
-                            </div>
-                        )}
-                    </div>
-
-                    {/* Selected Image Preview */}
-                    {selectedMedia && (
-                        <div className="bg-white rounded-2xl shadow-lg p-6 border border-gray-100">
-                            <h2 className="text-xl font-semibold text-gray-900 mb-4">Selected Image</h2>
-                            <div className="rounded-xl overflow-hidden">
-                                <img 
-                                    src={selectedMedia.url} 
-                                    alt={selectedMedia.name}
-                                    className="w-full h-48 object-cover"
-                                />
-                            </div>
-                            <p className="text-sm text-gray-600 mt-3 truncate">{selectedMedia.name}</p>
-                            {selectedMedia.needsReupload && (
-                                <div className="mt-2 p-2 bg-orange-50 border border-orange-200 rounded text-xs text-orange-700">
-                                    <span role="img" aria-label="warning">⚠️</span> This image needs to be re-uploaded for AI analysis
                                 </div>
-                            )}
-                        </div>
-                    )}
-
-                    {/* Data Management */}
-                    <div className="bg-white rounded-2xl shadow-lg p-6 border border-gray-100">
-                        <h2 className="text-xl font-semibold text-gray-900 mb-4">Data Management</h2>
-                        <div className="space-y-2">
-                            <button
-                                onClick={saveConversationToFile}
-                                disabled={apiResponses.length === 0}
-                                className="w-full px-4 py-2 bg-green-500 hover:bg-green-600 disabled:bg-gray-300 text-white rounded-lg font-medium transition-all duration-200 flex items-center justify-center gap-2"
-                            >
-                                <span role="img" aria-label="document">📄</span> Download Conversation JSON
-                            </button>
-                            <button
-                                onClick={saveImageToFile}
-                                disabled={!selectedMedia}
-                                className="w-full px-4 py-2 bg-blue-500 hover:bg-blue-600 disabled:bg-gray-300 text-white rounded-lg font-medium transition-all duration-200 flex items-center justify-center gap-2"
-                            >
-                                <span role="img" aria-label="picture">🖼️</span> Save Selected Image
-                            </button>
-                            <button
-                                onClick={clearConversations}
-                                className="w-full px-4 py-2 bg-yellow-500 hover:bg-yellow-600 text-white rounded-lg font-medium transition-all duration-200 flex items-center justify-center gap-2"
-                            >
-                                <span role="img" aria-label="broom">🧹</span> Clear Conversations
-                            </button>
-                            <button
-                                onClick={clearAllData}
-                                className="w-full px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg font-medium transition-all duration-200 flex items-center justify-center gap-2"
-                            >
-                                <span role="img" aria-label="trash">🗑️</span> Clear All Data
-                            </button>
-                        </div>
-                        <div className="mt-3 text-xs text-gray-500 space-y-1">
-                            <p><span role="img" aria-label="floppy disk">💾</span> Conversations auto-save locally</p>
-                            <p><span role="img" aria-label="folder">📁</span> JSON auto-downloads ONLY on browser close/refresh</p>
-                            <p><span role="img" aria-label="click">👆</span> Click "Download" for manual export</p>
-                            <p><span role="img" aria-label="warning">⚠️</span> Images need re-upload after page refresh</p>
+                            </div>
                         </div>
                     </div>
-                </div>
-
-                {/* Right Panel - Configuration and Results */}
-                <div className="lg:col-span-2 space-y-6">
-                    
-                    {/* Configuration */}
-                    <div className="bg-white rounded-2xl shadow-lg p-6 border border-gray-100">
-                        <h2 className="text-xl font-semibold text-gray-900 mb-6 flex items-center gap-2">
-                            <Settings className="w-5 h-5 text-purple-600" />
-                            Configuration
-                        </h2>
+                ) : (
+                    /* Regular Layout - Side by Side */
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 h-[calc(100vh-8rem)]">
                         
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                            
-                            {/* Age Input */}
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-2">
-                                    Child's Age
-                                </label>
-                                <input 
-                                    type="number" 
-                                    value={age} 
-                                    onChange={(e) => setAge(e.target.value)}
-                                    placeholder="Enter age..."
-                                    className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all duration-200"
-                                />
-                            </div>
-
-                            {/* Focus Selection */}
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-2">
-                                    Focus Area
-                                </label>
-                                <div className="space-y-2">
-                                    {focusChoices.map((choice) => (
-                                        <label key={choice.value} className="flex items-center cursor-pointer group">
-                                            <input 
-                                                type="radio" 
-                                                name="focus" 
-                                                value={choice.value} 
-                                                checked={focus === choice.value}
-                                                onChange={(e) => setFocus(e.target.value)}
-                                                className="mr-3 text-purple-600 focus:ring-purple-500"
-                                            />
-                                            <span className="flex items-center gap-2 group-hover:text-purple-600 transition-colors">
-                                                <span className="text-lg">{choice.icon}</span>
-                                                {choice.label}
-                                            </span>
-                                        </label>
-                                    ))}
-                                </div>
-                            </div>
-                        </div>
-
-                        {/* Mode Selection */}
-                        <div className="mt-6">
-                            <label className="block text-sm font-medium text-gray-700 mb-3">
-                                Interaction Mode
-                            </label>
-                            <div className="flex gap-3">
-                                <button
-                                    onClick={conversation}
-                                    className={`flex-1 flex items-center justify-center gap-2 py-3 px-4 rounded-xl font-medium transition-all duration-200 ${
-                                        mode === 'conversation'
-                                            ? 'bg-purple-600 text-white shadow-lg scale-105'
-                                            : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                                    }`}
-                                >
-                                    <MessageCircle className="w-5 h-5" />
-                                    Conversation
-                                </button>
-                                <button
-                                    onClick={suggestion}
-                                    className={`flex-1 flex items-center justify-center gap-2 py-3 px-4 rounded-xl font-medium transition-all duration-200 ${
-                                        mode === 'suggestion'
-                                            ? 'bg-purple-600 text-white shadow-lg scale-105'
-                                            : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                                    }`}
-                                >
-                                    <Lightbulb className="w-5 h-5" />
-                                    Suggestions
-                                </button>
-                            </div>
-
-                            {/* Conversation Type Selection */}
-                            {mode === 'conversation' && (
-                                <div className="mt-4">
-                                    <label className="block text-sm font-medium text-gray-700 mb-3">
-                                        Conversation Type
-                                    </label>
-                                    <div className="flex gap-3">
-                                        <button
-                                            onClick={() => setConversationType('text')}
-                                            className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-lg font-medium transition-all duration-200 ${
-                                                conversationType === 'text'
-                                                    ? 'bg-blue-500 text-white shadow-md'
-                                                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                                            }`}
-                                        >
-                                            <Type className="w-4 h-4" />
-                                            Text Chat
-                                        </button>
-                                        <button
-                                            onClick={() => setConversationType('voice')}
-                                            className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-lg font-medium transition-all duration-200 ${
-                                                conversationType === 'voice'
-                                                    ? 'bg-blue-500 text-white shadow-md'
-                                                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                                            }`}
-                                        >
-                                            <Mic className="w-4 h-4" />
-                                            Voice Chat
-                                        </button>
-                                    </div>
-                                </div>
-                            )}
-                        </div>
-                    </div>
-
-                    {/* Conversation Starters */}
-                    {mode === 'conversation' && selectedMedia && apiResponses.length === 0 && !isGenerating && (
-                        <div className="bg-white rounded-2xl shadow-lg p-6 border border-gray-100">
-                            <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                                <MessageCircle className="w-5 h-5 text-blue-600" />
-                                Conversation Starters
-                            </h3>
-                            <div className="grid grid-cols-1 gap-2">
-                                {conversationStarters[conversationType].map((starter, index) => (
+                        {/* LEFT PANEL - Selected Image */}
+                        <div className="bg-white rounded-2xl shadow-lg border border-gray-100 flex flex-col">
+                            {/* Toggle Button Row */}
+                            <div className="p-4 border-b border-gray-200 flex justify-between items-center">
+                                <h2 className="text-lg font-semibold text-gray-900">Selected Image</h2>
+                                <div className="flex items-center gap-4">
+                                    {sidebarCollapsed && selectedMedia && (
+                                        <div className="text-xs text-gray-600">
+                                            <span className="font-medium">Age:</span> {age} | <span className="font-medium">Focus:</span> {focus}
+                                        </div>
+                                    )}
                                     <button
-                                        key={index}
-                                        onClick={() => handleConversationStarter(starter)}
-                                        className="text-left p-3 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg transition-all duration-200 text-sm text-blue-800 hover:text-blue-900"
+                                        onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+                                        className="flex items-center gap-2 px-3 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg text-sm font-medium transition-all duration-200"
                                     >
-                                        💭 {starter}
+                                        {sidebarCollapsed ? (
+                                            <>
+                                                <Settings className="w-4 h-4" />
+                                                Settings
+                                            </>
+                                        ) : (
+                                            <>
+                                                <X className="w-4 h-4" />
+                                                Hide
+                                            </>
+                                        )}
                                     </button>
-                                ))}
+                                </div>
                             </div>
-                        </div>
-                    )}
 
-                    {/* Error Display */}
-                    {(sttError || ttsError) && (
-                        <div className="bg-red-50 border border-red-200 rounded-2xl p-4">
-                            <div className="flex items-center gap-2 text-red-800 mb-2">
-                                <AlertCircle className="w-5 h-5" />
-                                <h3 className="font-medium">Voice Service Errors</h3>
-                            </div>
-                            {sttError && <p className="text-sm text-red-600">Speech-to-Text: {sttError}</p>}
-                            {ttsError && <p className="text-sm text-red-600">Text-to-Speech: {ttsError}</p>}
-                        </div>
-                    )}
-
-                    {/* AI Response Area */}
-                    <div className="bg-white rounded-2xl shadow-lg border border-gray-100 min-h-[400px] flex flex-col">
-                        <div className="p-6 border-b border-gray-200">
-                            <h2 className="text-xl font-semibold text-gray-900 flex items-center gap-2">
-                                {mode === 'conversation' ? (
+                            {/* Selected Image Content */}
+                            <div className="flex-1 p-4 flex flex-col">
+                                {selectedMedia ? (
                                     <>
-                                        <MessageCircle className="w-5 h-5 text-purple-600" />
-                                        AI Conversation
+                                        <div className="flex-1 rounded-xl overflow-hidden bg-gray-50 flex items-center justify-center">
+                                            <img 
+                                                src={selectedMedia.url} 
+                                                alt={selectedMedia.name}
+                                                className="w-full h-full object-contain"
+                                            />
+                                        </div>
+                                        <div className="mt-3">
+                                            <p className="text-sm text-gray-600 truncate">{selectedMedia.name}</p>
+                                            {selectedMedia.needsReupload && (
+                                                <div className="mt-2 p-2 bg-orange-50 border border-orange-200 rounded text-xs text-orange-700">
+                                                    <span role="img" aria-label="warning">⚠️</span> This image needs to be re-uploaded for AI analysis
+                                                </div>
+                                            )}
+                                        </div>
                                     </>
                                 ) : (
-                                    <>
-                                        <Lightbulb className="w-5 h-5 text-purple-600" />
-                                        Activity Suggestions
-                                    </>
+                                    <div className="flex-1 flex flex-col items-center justify-center text-gray-500">
+                                        <Camera className="w-16 h-16 mb-4 text-gray-300" />
+                                        <p className="text-lg font-medium">No Image Selected</p>
+                                        <p className="text-sm text-center">Upload and select an image from the controls below to get started</p>
+                                    </div>
                                 )}
-                                {apiResponses.length > 0 && (
-                                    <span className="bg-green-100 text-green-700 text-xs px-2 py-1 rounded-full ml-auto">
-                                        {apiResponses.length} saved
-                                    </span>
-                                )}
-                            </h2>
+                            </div>
                         </div>
 
-                        <div className="flex-1 p-6">
-                            {!selectedMedia ? (
-                                <div className="flex flex-col items-center justify-center h-full text-gray-500">
-                                    <Camera className="w-16 h-16 mb-4 text-gray-300" />
-                                    <p className="text-lg font-medium">Select an image to begin</p>
-                                    <p className="text-sm">Choose an image from your library to start exploring activities</p>
-                                </div>
-                            ) : apiResponses.length === 0 && !isGenerating ? (
-                                <div className="flex flex-col items-center justify-center h-full text-gray-500">
-                                    {mode === 'conversation' ? (
-                                        <>
-                                            <MessageCircle className="w-16 h-16 mb-4 text-gray-300" />
-                                            <p className="text-lg font-medium">Ready to chat!</p>
-                                            <p className="text-sm">Use a conversation starter or click "Start" to begin</p>
-                                        </>
-                                    ) : (
-                                        <>
-                                            <Lightbulb className="w-16 h-16 mb-4 text-gray-300" />
-                                            <p className="text-lg font-medium">Generate suggestions</p>
-                                            <p className="text-sm">Click "Generate Suggestions" to get activity ideas</p>
-                                        </>
+                        {/* RIGHT PANEL - Conversation/Suggestions */}
+                        <div className="bg-white rounded-2xl shadow-lg border border-gray-100 flex flex-col">
+                            {/* Header */}
+                            <div className="p-4 border-b border-gray-200">
+                                <div className="flex items-center justify-between">
+                                    <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                                        {mode === 'conversation' ? (
+                                            <>
+                                                <MessageCircle className="w-5 h-5 text-purple-600" />
+                                                AI Conversation
+                                            </>
+                                        ) : (
+                                            <>
+                                                <Lightbulb className="w-5 h-5 text-purple-600" />
+                                                Activity Suggestions
+                                            </>
+                                        )}
+                                    </h2>
+                                    {apiResponses.length > 0 && (
+                                        <span className="bg-green-100 text-green-700 text-xs px-2 py-1 rounded-full">
+                                            {apiResponses.length} saved
+                                        </span>
                                     )}
                                 </div>
-                            ) : (
-                                <div className="space-y-4">
-                                    {mode === 'conversation' ? (
-                                        // Conversation Mode - Show full back-and-forth conversation
-                                        <div className="space-y-3 max-h-64 overflow-y-auto">
-                                            {apiResponses.map((response, index) => (
-                                                <div key={response.responseId || index}>
-                                                    {response.type === 'user_message' || response.sender === 'user' ? (
-                                                        // User Message - Right aligned, blue
-                                                        <div className="flex justify-end mb-2">
-                                                            <div className="bg-blue-500 text-white rounded-2xl rounded-br-md px-4 py-2 max-w-xs shadow-sm">
-                                                                <div className="text-sm font-medium mb-1">You</div>
-                                                                <div className="text-sm">
-                                                                    {response.candidates?.[0]?.content?.parts?.[0]?.text || response.content}
-                                                                </div>
-                                                                <div className="text-xs opacity-75 mt-1">
-                                                                    {new Date(response.responseId || Date.now()).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
-                                                                </div>
-                                                            </div>
-                                                        </div>
-                                                    ) : (
-                                                        // AI Message - Left aligned, gray
-                                                        <div className="flex justify-start mb-2">
-                                                            <div className="bg-gray-100 text-gray-800 rounded-2xl rounded-bl-md px-4 py-2 max-w-xs shadow-sm">
-                                                                <div className="text-sm font-medium mb-1 text-purple-600">AI Assistant</div>
-                                                                <div className="text-sm prose prose-sm max-w-none">
-                                                                    {response.candidates?.[0]?.content?.parts?.[0]?.text || response.content}
-                                                                </div>
-                                                                <div className="flex items-center justify-between mt-2">
-                                                                    <div className="text-xs text-gray-500">
-                                                                        {new Date(response.responseId || Date.now()).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
-                                                                    </div>
-                                                                    {conversationType === 'voice' && (
-                                                                        <button
-                                                                            onClick={() => playResponse(response.candidates?.[0]?.content?.parts?.[0]?.text || response.content)}
-                                                                            disabled={isSpeaking}
-                                                                            className="ml-2 flex items-center gap-1 text-xs text-purple-600 hover:text-purple-700 disabled:text-gray-400"
-                                                                        >
-                                                                            <Volume2 className="w-3 h-3" />
-                                                                            {isSpeaking ? 'Playing...' : 'Play'}
-                                                                        </button>
-                                                                    )}
-                                                                </div>
-                                                            </div>
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            ))}
-                                            {isGenerating && (
-                                                <div className="flex justify-start mb-2">
-                                                    <div className="bg-gray-100 text-gray-800 rounded-2xl rounded-bl-md px-4 py-2 max-w-xs shadow-sm">
-                                                        <div className="flex items-center gap-2 text-gray-500">
-                                                            <div className="animate-spin w-4 h-4 border-2 border-purple-600 border-t-transparent rounded-full"></div>
-                                                            <span className="text-sm">AI is thinking...</span>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            )}
-                                        </div>
-                                    ) : (
-                                        // Suggestion Mode - Card Layout
-                                        <div className="max-h-64 overflow-y-auto">
-                                            {apiResponses.length > 0 && (() => {
-                                                const lastResponse = apiResponses[apiResponses.length - 1];
-                                                const responseText = lastResponse.candidates?.[0]?.content?.parts?.[0]?.text || '';
-                                                const suggestionCards = parseSuggestionCards(responseText);
-                                                
-                                                return (
-                                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                                        {suggestionCards.map((card, index) => (
-                                                            <div key={index} className="bg-gradient-to-br from-blue-50 to-purple-50 rounded-xl p-4 border border-gray-200 hover:shadow-md transition-all duration-200">
-                                                                <div className="flex items-center gap-3 mb-3">
-                                                                    <span className="text-2xl">{card.icon}</span>
-                                                                    <h3 className="font-semibold text-blue-600 text-lg">{card.title}</h3>
-                                                                </div>
-                                                                <p className="text-gray-700 text-sm leading-relaxed">{card.description}</p>
-                                                            </div>
-                                                        ))}
-                                                    </div>
-                                                );
-                                            })()}
-                                            {isGenerating && (
-                                                <div className="bg-gray-50 rounded-xl p-4">
-                                                    <div className="flex items-center gap-2 text-gray-500">
-                                                        <div className="animate-spin w-4 h-4 border-2 border-purple-600 border-t-transparent rounded-full"></div>
-                                                        Generating suggestions...
-                                                    </div>
-                                                </div>
-                                            )}
-                                        </div>
-                                    )}
+                            </div>
+
+                            {/* Error Display */}
+                            {(sttError || ttsError) && (
+                                <div className="mx-4 mt-4 bg-red-50 border border-red-200 rounded-xl p-3">
+                                    <div className="flex items-center gap-2 text-red-800 mb-1">
+                                        <AlertCircle className="w-4 h-4" />
+                                        <h3 className="font-medium text-sm">Voice Service Errors</h3>
+                                    </div>
+                                    {sttError && <p className="text-xs text-red-600">Speech-to-Text: {sttError}</p>}
+                                    {ttsError && <p className="text-xs text-red-600">Text-to-Speech: {ttsError}</p>}
                                 </div>
                             )}
-                        </div>
 
-                        {/* Input Area */}
-                        <div className="p-6 border-t border-gray-200">
-                            {mode === 'conversation' ? (
-                                conversationType === 'text' ? (
-                                    // Text Input
+                            {/* Speech Control - Stop Button */}
+                            {isSpeaking && conversationType !== 'voice' && (
+                                <div className="mx-4 mt-4 bg-orange-50 border border-orange-200 rounded-xl p-3">
+                                    <div className="flex items-center justify-between">
+                                        <div className="flex items-center gap-2 text-orange-800">
+                                            <Volume2 className="w-4 h-4" />
+                                            <span className="font-medium text-sm">Playing audio...</span>
+                                        </div>
+                                        <button
+                                            onClick={stop}
+                                            className="flex items-center gap-2 px-3 py-1 bg-red-500 hover:bg-red-600 text-white rounded-lg text-sm font-medium transition-all duration-200"
+                                        >
+                                            <X className="w-3 h-3" />
+                                            Stop
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Content Area */}
+                            <div className="flex-1 p-4 overflow-y-auto">
+                                {renderConversationContent()}
+                            </div>
+
+                            {/* Input Area */}
+                            <div className="p-4 border-t border-gray-200">
+                                {mode === 'conversation' ? (
+                                    // Text Input (voice mode handled above)
                                     <div className="flex gap-3">
                                         <input
                                             type="text"
@@ -1230,73 +1398,276 @@ const MediaLibraryInterface = () => {
                                         </button>
                                     </div>
                                 ) : (
-                                    // Voice Input - Auto-send when recording stops
-                                    <div className="flex flex-col items-center gap-4">
-                                        <div className="flex items-center gap-4">
-                                            <button
-                                                onClick={isListening ? stopRecording : startRecording}
-                                                disabled={isGenerating || !selectedMedia}
-                                                className={`px-8 py-4 rounded-full font-medium transition-all duration-200 flex items-center gap-3 ${
-                                                    isListening 
-                                                        ? 'bg-red-600 hover:bg-red-700 text-white animate-pulse' 
-                                                        : 'bg-purple-600 hover:bg-purple-700 text-white'
-                                                } disabled:bg-gray-400`}
+                                    <button
+                                        onClick={() => getApiResponse()}
+                                        disabled={isGenerating || !selectedMedia}
+                                        className="w-full px-6 py-3 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-400 text-white rounded-xl font-medium transition-all duration-200 flex items-center justify-center gap-2"
+                                    >
+                                        <Lightbulb className="w-5 h-5" />
+                                        {isGenerating ? 'Generating...' : 'Generate Suggestions'}
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                )}
+            </div>
+
+            {/* BOTTOM PANEL - Collapsible Controls */}
+            {!sidebarCollapsed && (
+                <div className="border-t bg-white">
+                    <div className="max-w-7xl mx-auto p-4">
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                            
+                            {/* Upload Section */}
+                            <div className="bg-gray-50 rounded-xl p-4">
+                                <h3 className="text-sm font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                                    <Upload className="w-4 h-4 text-purple-600" />
+                                    Upload Media
+                                </h3>
+                                
+                                <label className="relative group cursor-pointer">
+                                    <div className="border-2 border-dashed border-purple-300 rounded-lg p-4 text-center transition-all duration-200 hover:border-purple-400 hover:bg-purple-50">
+                                        <Plus className="w-6 h-6 text-purple-400 mx-auto mb-2" />
+                                        <p className="text-purple-600 font-medium text-xs">Click to upload</p>
+                                    </div>
+                                    <input 
+                                        type="file" 
+                                        accept="image/*" 
+                                        multiple 
+                                        onChange={uploadMedia}
+                                        className="hidden"
+                                    />
+                                </label>
+                            </div>
+
+                            {/* Media Library */}
+                            <div className="bg-gray-50 rounded-xl p-4">
+                                <h3 className="text-sm font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                                    <Camera className="w-4 h-4 text-purple-600" />
+                                    Media Library ({mediaFiles.length})
+                                </h3>
+                                
+                                {mediaFiles.length === 0 ? (
+                                    <div className="text-center py-4 text-gray-500">
+                                        <p className="text-xs">No images uploaded</p>
+                                    </div>
+                                ) : (
+                                    <div className="grid grid-cols-3 gap-2 max-h-24 overflow-y-auto">
+                                        {mediaFiles.map((file) => (
+                                            <div 
+                                                key={file.id} 
+                                                className={`relative group cursor-pointer rounded-lg overflow-hidden transition-all duration-200 ${
+                                                    selectedMedia?.id === file.id 
+                                                        ? 'ring-2 ring-purple-400 ring-offset-1' 
+                                                        : 'hover:scale-105'
+                                                } ${file.needsReupload ? 'opacity-50' : ''}`}
+                                                onClick={() => !file.needsReupload && selectMedia(file)}
                                             >
-                                                {isListening ? (
-                                                    <>
-                                                        <MicOff className="w-5 h-5" />
-                                                        Click to Stop
-                                                    </>
-                                                ) : (
-                                                    <>
-                                                        <Mic className="w-5 h-5" />
-                                                        {apiResponses.length === 0 ? 'Start Voice Chat' : 'Record Message'}
-                                                    </>
+                                                <img 
+                                                    src={file.url} 
+                                                    alt={file.name} 
+                                                    className="w-full h-16 object-cover"
+                                                />
+                                                {file.needsReupload && (
+                                                    <div className="absolute inset-0 bg-red-500 bg-opacity-20 flex items-center justify-center">
+                                                        <div className="text-xs text-red-700 font-bold text-center p-1">
+                                                            Re-upload
+                                                        </div>
+                                                    </div>
                                                 )}
+                                                <button
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        deleteMedia(file.id);
+                                                    }}
+                                                    className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity bg-red-500 hover:bg-red-600 text-white p-1 rounded-full"
+                                                >
+                                                    <Trash2 className="w-3 h-3" />
+                                                </button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Configuration */}
+                            <div className="bg-gray-50 rounded-xl p-4">
+                                <h3 className="text-sm font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                                    <Settings className="w-4 h-4 text-purple-600" />
+                                    Configuration
+                                </h3>
+                                
+                                <div className="space-y-3">
+                                    {/* Age Input */}
+                                    <div>
+                                        <label className="block text-xs font-medium text-gray-700 mb-1">Child's Age</label>
+                                        <input 
+                                            type="number" 
+                                            value={age} 
+                                            onChange={(e) => setAge(e.target.value)}
+                                            placeholder="Age..."
+                                            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                                        />
+                                    </div>
+
+                                    {/* Focus Selection */}
+                                    <div>
+                                        <label className="block text-xs font-medium text-gray-700 mb-1">Focus Area</label>
+                                        <div className="space-y-1">
+                                            {focusChoices.map((choice) => (
+                                                <label key={choice.value} className="flex items-center cursor-pointer">
+                                                    <input 
+                                                        type="radio" 
+                                                        name="focus" 
+                                                        value={choice.value} 
+                                                        checked={focus === choice.value}
+                                                        onChange={(e) => setFocus(e.target.value)}
+                                                        className="mr-2 text-purple-600"
+                                                    />
+                                                    <span className="text-xs">{choice.label}</span>
+                                                </label>
+                                            ))}
+                                        </div>
+                                    </div>
+
+                                    {/* Mode Selection */}
+                                    <div>
+                                        <label className="block text-xs font-medium text-gray-700 mb-1">Mode</label>
+                                        <div className="flex gap-1">
+                                            <button
+                                                onClick={conversation}
+                                                className={`flex-1 py-1 px-2 rounded text-xs font-medium transition-all duration-200 ${
+                                                    mode === 'conversation'
+                                                        ? 'bg-purple-600 text-white'
+                                                        : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                                                }`}
+                                            >
+                                                Chat
+                                            </button>
+                                            <button
+                                                onClick={suggestion}
+                                                className={`flex-1 py-1 px-2 rounded text-xs font-medium transition-all duration-200 ${
+                                                    mode === 'suggestion'
+                                                        ? 'bg-purple-600 text-white'
+                                                        : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                                                }`}
+                                            >
+                                                Ideas
                                             </button>
                                         </div>
-                                        
-                                        {isListening && (
-                                            <div className="text-sm text-gray-600 flex items-center gap-2">
-                                                <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
-                                                <span role="img" aria-label="microphone">🎤</span> Recording... Click "Click to Stop" when finished
-                                            </div>
-                                        )}
-                                        
-                                        {transcript && !isListening && (
-                                            <div className="bg-blue-50 rounded-lg p-4 max-w-md border border-blue-200">
-                                                <div className="text-sm font-medium text-blue-800 mb-1">
-                                                    <span role="img" aria-label="microphone">🎤</span> Your Message (Auto-sending in 1 second...):
+
+                                        {/* Conversation Type */}
+                                        {mode === 'conversation' && (
+                                            <div className="mt-2">
+                                                <div className="flex gap-1">
+                                                    <button
+                                                        onClick={() => {
+                                                            setConversationType('text');
+                                                            resetTranscript();
+                                                            setCurrentAIResponse('');
+                                                            setShowChatHistory(false);
+                                                        }}
+                                                        className={`flex-1 py-1 px-2 rounded text-xs font-medium transition-all duration-200 ${
+                                                            conversationType === 'text'
+                                                                ? 'bg-blue-500 text-white'
+                                                                : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                                                        }`}
+                                                    >
+                                                        Text
+                                                    </button>
+                                                    <button
+                                                        onClick={() => {
+                                                            setConversationType('voice');
+                                                            setInput('');
+                                                            setCurrentAIResponse('');
+                                                            setShowChatHistory(false);
+                                                        }}
+                                                        className={`flex-1 py-1 px-2 rounded text-xs font-medium transition-all duration-200 ${
+                                                            conversationType === 'voice'
+                                                                ? 'bg-blue-500 text-white'
+                                                                : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                                                        }`}
+                                                    >
+                                                        Voice
+                                                    </button>
                                                 </div>
-                                                <div className="text-sm text-blue-700">{transcript}</div>
-                                                <div className="mt-2 flex items-center gap-2 text-xs text-blue-600">
-                                                    <div className="animate-spin w-3 h-3 border border-blue-600 border-t-transparent rounded-full"></div>
-                                                    Sending to AI...
-                                                </div>
-                                            </div>
-                                        )}
-                                        
-                                        {!isListening && !transcript && apiResponses.length > 0 && (
-                                            <div className="text-sm text-gray-500 text-center">
-                                                <span role="img" aria-label="microphone">🎤</span> Click the microphone to continue the conversation
                                             </div>
                                         )}
                                     </div>
-                                )
-                            ) : (
-                                <button
-                                    onClick={() => getApiResponse()}
-                                    disabled={isGenerating || !selectedMedia}
-                                    className="w-full px-6 py-3 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-400 text-white rounded-xl font-medium transition-all duration-200 flex items-center justify-center gap-2"
-                                >
-                                    <Lightbulb className="w-5 h-5" />
-                                    {isGenerating ? 'Generating...' : 'Generate Suggestions'}
-                                </button>
-                            )}
+                                </div>
+                            </div>
+
+                            {/* Data Management */}
+                            <div className="bg-gray-50 rounded-xl p-4">
+                                <h3 className="text-sm font-semibold text-gray-900 mb-3">Data Management</h3>
+                                <div className="space-y-2">
+                                    <button
+                                        onClick={saveConversationToFile}
+                                        disabled={apiResponses.length === 0}
+                                        className="w-full px-3 py-2 bg-green-500 hover:bg-green-600 disabled:bg-gray-300 text-white rounded-lg text-xs font-medium transition-all duration-200"
+                                    >
+                                        📄 Download JSON
+                                    </button>
+                                    <button
+                                        onClick={saveImageToFile}
+                                        disabled={!selectedMedia}
+                                        className="w-full px-3 py-2 bg-blue-500 hover:bg-blue-600 disabled:bg-gray-300 text-white rounded-lg text-xs font-medium transition-all duration-200"
+                                    >
+                                        🖼️ Save Image
+                                    </button>
+                                    <button
+                                        onClick={clearConversations}
+                                        className="w-full px-3 py-2 bg-yellow-500 hover:bg-yellow-600 text-white rounded-lg text-xs font-medium transition-all duration-200"
+                                    >
+                                        🧹 Clear Chat
+                                    </button>
+                                    <button
+                                        onClick={clearAllData}
+                                        className="w-full px-3 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg text-xs font-medium transition-all duration-200"
+                                    >
+                                        🗑️ Clear All
+                                    </button>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
-            </div>
+            )}
+
+            {/* Activity Card Modal */}
+            {selectedActivityCard && (
+                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4"
+                     onClick={() => setSelectedActivityCard(null)}>
+                    <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[80vh] overflow-y-auto"
+                         onClick={(e) => e.stopPropagation()}>
+                        <div className="p-8">
+                            <div className="flex justify-between items-start mb-6">
+                                <h2 className="text-2xl font-bold text-blue-600">{selectedActivityCard.title}</h2>
+                                <button
+                                    onClick={() => setSelectedActivityCard(null)}
+                                    className="text-gray-500 hover:text-gray-700 p-2 hover:bg-gray-100 rounded-full transition-all"
+                                >
+                                    <X className="w-6 h-6" />
+                                </button>
+                            </div>
+                            <div className="prose prose-lg max-w-none">
+                                <p className="text-gray-700 leading-relaxed text-lg">{selectedActivityCard.description}</p>
+                            </div>
+                            <div className="mt-6 flex justify-center">
+                                <button
+                                    onClick={() => playResponse(selectedActivityCard.title + ". " + selectedActivityCard.description)}
+                                    disabled={isSpeaking}
+                                    className="flex items-center gap-2 px-6 py-3 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-400 text-white rounded-xl font-medium transition-all duration-200"
+                                >
+                                    <Volume2 className="w-5 h-5" />
+                                    {isSpeaking ? 'Playing...' : 'Play Activity'}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };
