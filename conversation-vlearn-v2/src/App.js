@@ -654,7 +654,7 @@ const MediaLibraryInterface = () => {
                     prompt = `Begin a conversation about this image specifically focused on ${focus} for a ${age}-year-old child. 
                     
                     IMPORTANT: Your conversation must be directly related to ${focus}. 
-                    
+
                     For example:
                     - If focus is "Learning and Education": Ask about educational aspects, counting, letters, learning opportunities
                     - If focus is "Creativity": Ask about imagination, art, creative expression, what they could create
@@ -693,6 +693,7 @@ const MediaLibraryInterface = () => {
                 
                 Please provide exactly 4-6 activities that specifically target ${focus} using what you see in the image. Each activity should be age-appropriate for ${age} years old.
                 
+
                 Format each activity with a clear title and detailed description. Use this exact format:
 
                 Activity 1: [Title focused on ${focus}]
@@ -797,6 +798,7 @@ const MediaLibraryInterface = () => {
     // Function to render chat history
     const renderChatHistory = () => {
         return (
+
             <div className="space-y-3 max-h-[460px] overflow-y-auto">
                 {apiResponses.map((response, index) => (
                     <div key={response.responseId || index}>
@@ -856,6 +858,7 @@ const MediaLibraryInterface = () => {
     // Function to render current voice transcript
     const renderCurrentVoiceTranscript = () => {
         return (
+
             <div className="space-y-4 max-h-[400px] overflow-y-auto">
                 {/* Current AI Response (when AI is speaking) */}
                 {isSpeaking && currentAIResponse && (
@@ -1443,6 +1446,7 @@ const MediaLibraryInterface = () => {
                                         <p className="text-xs">No images uploaded</p>
                                     </div>
                                 ) : (
+
                                     <div className="grid grid-cols-3 gap-2 max-h-[250px] overflow-y-auto">
                                         {mediaFiles.map((file) => (
                                             <div 
