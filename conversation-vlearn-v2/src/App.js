@@ -1,5 +1,5 @@
 import React from 'react';
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Upload, X, MessageCircle, Lightbulb, Send, Camera, Settings, Trash2, Plus, Mic, MicOff, Type, Volume2, AlertCircle, Eye, Palette, Hash, HelpCircle } from "lucide-react";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
@@ -9,36 +9,29 @@ const useGoogleSpeechToText = () => {
   const [transcript, setTranscript] = useState('');
   const [error, setError] = useState(null);
   const [mediaRecorder, setMediaRecorder] = useState(null);
-  const [audioChunks, setAudioChunks] = useState([]);
 
   const startListening = async () => {
     try {
-      console.log('🎤 Starting microphone access...');
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const recorder = new MediaRecorder(stream);
-      
+      const chunks = []; 
+  
       setMediaRecorder(recorder);
-      setAudioChunks([]);
       setIsListening(true);
       setError(null);
-      console.log('🎤 Microphone access granted, starting recording...');
-      
+  
       recorder.ondataavailable = (event) => {
-        console.log('🎤 Audio data received:', event.data.size, 'bytes');
-        setAudioChunks(prev => [...prev, event.data]);
+        chunks.push(event.data);
       };
-      
+  
       recorder.onstop = async () => {
-        console.log('🎤 Recording stopped, processing audio...');
-        const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
-        console.log('🎤 Audio blob created:', audioBlob.size, 'bytes');
+        const audioBlob = new Blob(chunks, { type: 'audio/webm' }); 
         await transcribeAudio(audioBlob);
-        stream.getTracks().forEach(track => track.stop());
+        stream.getTracks().forEach((track) => track.stop());
       };
-      
+  
       recorder.start();
     } catch (err) {
-      console.error('🎤 Microphone access error:', err);
       setError(`Microphone access denied: ${err.message}`);
       setIsListening(false);
     }
@@ -112,75 +105,87 @@ const useGoogleSpeechToText = () => {
 
 // Enhanced Google Cloud Text-to-Speech Hook with better error handling
 const useGoogleTextToSpeech = () => {
-  const [isSpeaking, setIsSpeaking] = useState(false);
-  const [error, setError] = useState(null);
-
-  const speak = async (text) => {
-    const apiKey = process.env.REACT_APP_GOOGLE_CLOUD_API_KEY;
-    
-    if (!apiKey) {
-      setError('Google Cloud API key not found. Check your .env file.');
-      console.error('❌ Google Cloud API key missing for TTS');
-      return;
-    }
-
-    try {
-      console.log('🔊 Starting text-to-speech for:', text.substring(0, 50) + '...');
-      setIsSpeaking(true);
-      setError(null);
-
-      const response = await fetch('https://texttospeech.googleapis.com/v1/text:synthesize?key=' + apiKey, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          input: { text },
-          voice: {
-            languageCode: 'en-US',
-            name: 'en-US-Wavenet-F',
-            ssmlGender: 'FEMALE',
-          },
-          audioConfig: {
-            audioEncoding: 'MP3',
-          },
-        }),
-      });
-
-      console.log('🔊 TTS API response status:', response.status);
-      const result = await response.json();
-      
-      if (result.audioContent) {
-        console.log('✅ TTS successful, playing audio...');
-        const audio = new Audio(`data:audio/mp3;base64,${result.audioContent}`);
-        audio.onended = () => {
-          console.log('🔊 Audio playback finished');
+    const [isSpeaking, setIsSpeaking] = useState(false);
+    const [error, setError] = useState(null);
+    const audioRef = useRef(null);  
+  
+    const speak = async (text) => {
+      const apiKey = process.env.REACT_APP_GOOGLE_CLOUD_API_KEY;
+  
+      if (!apiKey) {
+        setError('Google Cloud API key not found. Check your .env file.');
+        console.error('❌ Google Cloud API key missing for TTS');
+        return;
+      }
+  
+      try {
+        setIsSpeaking(true);
+        setError(null);
+  
+        const response = await fetch(
+          'https://texttospeech.googleapis.com/v1/text:synthesize?key=' + apiKey,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              input: { text },
+              voice: {
+                languageCode: 'en-US',
+                name: 'en-US-Wavenet-F',
+                ssmlGender: 'FEMALE',
+              },
+              audioConfig: { audioEncoding: 'MP3' },
+            }),
+          }
+        );
+  
+        const result = await response.json();
+  
+        if (result.audioContent) {
+          // If an audio is already playing, stop it first
+          if (audioRef.current) {
+            audioRef.current.pause();
+            audioRef.current = null;
+          }
+  
+          const audio = new Audio(`data:audio/mp3;base64,${result.audioContent}`);
+          audioRef.current = audio;
+  
+          audio.onended = () => {
+            setIsSpeaking(false);
+            audioRef.current = null;
+          };
+  
+          audio.onerror = (err) => {
+            setError('Audio playback failed');
+            setIsSpeaking(false);
+            audioRef.current = null;
+            console.error('🔊 Audio playback error:', err);
+          };
+  
+          await audio.play();
+        } else {
+          setError('Text-to-speech failed: No audio content received');
           setIsSpeaking(false);
-        };
-        audio.onerror = (err) => {
-          console.error('🔊 Audio playback error:', err);
-          setError('Audio playback failed');
-          setIsSpeaking(false);
-        };
-        await audio.play();
-      } else {
-        console.error('❌ No audio content in TTS response:', result);
-        setError('Text-to-speech failed: No audio content received');
+        }
+      } catch (err) {
+        setError(`Text-to-speech failed: ${err.message}`);
         setIsSpeaking(false);
       }
-    } catch (err) {
-      console.error('❌ TTS error:', err);
-      setError(`Text-to-speech failed: ${err.message}`);
+    };
+  
+    const stop = () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current.currentTime = 0; // Reset to start
+        audioRef.current = null;
+      }
       setIsSpeaking(false);
-    }
+    };
+  
+    return { speak, stop, isSpeaking, error };
   };
-
-  const stop = () => {
-    setIsSpeaking(false);
-  };
-
-  return { speak, stop, isSpeaking, error };
-};
+  
 
 const MediaLibraryInterface = () => {
     // 🔑 API KEYS - Read from environment variables
@@ -217,8 +222,7 @@ const MediaLibraryInterface = () => {
     // Load saved data on component mount
     useEffect(() => {
         const savedConversations = localStorage.getItem('ai-media-conversations');
-        const savedMediaFiles = localStorage.getItem('ai-media-files');
-        
+
         if (savedConversations) {
             try {
                 setResponses(JSON.parse(savedConversations));
@@ -227,20 +231,6 @@ const MediaLibraryInterface = () => {
             }
         }
         
-        if (savedMediaFiles) {
-            try {
-                const parsed = JSON.parse(savedMediaFiles);
-                // Note: These will be metadata only, actual File objects need to be re-uploaded
-                const mediaWithWarning = parsed.map(file => ({
-                    ...file,
-                    file: null, // File object not available after refresh
-                    needsReupload: true
-                }));
-                setMediaFiles(mediaWithWarning);
-            } catch (err) {
-                console.error('Error loading saved media files:', err);
-            }
-        }
     }, []);
 
     // Save conversations to localStorage whenever they change
@@ -664,7 +654,7 @@ const MediaLibraryInterface = () => {
                     prompt = `Begin a conversation about this image specifically focused on ${focus} for a ${age}-year-old child. 
                     
                     IMPORTANT: Your conversation must be directly related to ${focus}. 
-                    
+
                     For example:
                     - If focus is "Learning and Education": Ask about educational aspects, counting, letters, learning opportunities
                     - If focus is "Creativity": Ask about imagination, art, creative expression, what they could create
@@ -703,6 +693,7 @@ const MediaLibraryInterface = () => {
                 
                 Please provide exactly 4-6 activities that specifically target ${focus} using what you see in the image. Each activity should be age-appropriate for ${age} years old.
                 
+
                 Format each activity with a clear title and detailed description. Use this exact format:
 
                 Activity 1: [Title focused on ${focus}]
@@ -807,7 +798,8 @@ const MediaLibraryInterface = () => {
     // Function to render chat history
     const renderChatHistory = () => {
         return (
-            <div className="space-y-3">
+
+            <div className="space-y-3 max-h-[460px] overflow-y-auto">
                 {apiResponses.map((response, index) => (
                     <div key={response.responseId || index}>
                         {response.type === 'user_message' || response.sender === 'user' ? (
@@ -866,7 +858,8 @@ const MediaLibraryInterface = () => {
     // Function to render current voice transcript
     const renderCurrentVoiceTranscript = () => {
         return (
-            <div className="space-y-4">
+
+            <div className="space-y-4 max-h-[400px] overflow-y-auto">
                 {/* Current AI Response (when AI is speaking) */}
                 {isSpeaking && currentAIResponse && (
                     <div className="w-full">
@@ -1453,7 +1446,8 @@ const MediaLibraryInterface = () => {
                                         <p className="text-xs">No images uploaded</p>
                                     </div>
                                 ) : (
-                                    <div className="grid grid-cols-3 gap-2 max-h-24 overflow-y-auto">
+
+                                    <div className="grid grid-cols-3 gap-2 max-h-[250px] overflow-y-auto">
                                         {mediaFiles.map((file) => (
                                             <div 
                                                 key={file.id} 
