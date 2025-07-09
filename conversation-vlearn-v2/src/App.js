@@ -215,9 +215,9 @@ const MediaLibraryInterface = () => {
 
     const focusChoices = [
         { value: "Literacy and Communication", label: "Literacy and Communication", icon: <span role="img" aria-label="book">📚</span> },
-        { value: "Engineering and Design Thinking", label: "Engineering and Design Thinking", icon: <span role="img" aria-label="gears">⚙️</span> },
+        { value: "STEM", label: "STEM", icon: <span role="img" aria-label="gears">⚙️</span> },
         { value: "Creativity", label: "Creativity", icon: <span role="img" aria-label="art">🎨</span> },
-        { value: "Emotion Intelligence", label: "Emotional Intelligence", icon: <span role="img" aria-label="heart">❤️</span> },
+        { value: "Emotional Intelligence", label: "Emotional Intelligence", icon: <span role="img" aria-label="heart">❤️</span> },
     ];
 
     // Load saved data on component mount
@@ -657,9 +657,9 @@ const MediaLibraryInterface = () => {
                     IMPORTANT: Your conversation must be directly related to ${focus}. 
 
                     For example:
-                    - If focus is "Literacy and Communication": Ask about words, letters, reading, writing, how to express ideas
-                    - If focus is "Engineering and Design Thinking": Ask about how things are built, what they're made of, how they work, designing new things, new inventions
-                    - If focus is "Creativity": Ask about imagination, art, creative expression, what they could create
+                    - If focus is "Literacy and Communication": Ask about words, letters, reading, writing, how to express ideas, fun facts, personal experience, social skills
+                    - If focus is "STEM": Ask about counting, numeracy, how things are built, what they're made of, how they work, designing new things, scientific thinking, hypothesis, cause and effect
+                    - If focus is "Creativity": Ask about imagination, art, creative expression, what they could create, design thinking
                     - If focus is "Emotional Intelligence": Ask about feelings, emotions, how characters might feel, emotional responses
                     
                     Start with a warm greeting and ask an engaging question that specifically relates to ${focus} based on what you see in the image. Keep the conversation interactive and educational within the ${focus} theme.
@@ -691,9 +691,9 @@ const MediaLibraryInterface = () => {
                 
                 IMPORTANT: All activities must be directly related to ${focus}:
                 
-                - If focus is "Literacy and Communication": Activities should help identify words,learn new words, tell stories, practice speaking, or understand messages
-                - If focus is "Engineering and Design Thinking": Activities should involve building, designing, understanding mechanisms, or solving physical problems 
-                - If focus is "Creativity": Activities should involve imagination, artistic expression, creative storytelling, building, drawing, role-playing
+                - If focus is "Literacy and Communication": Activities should help identify words,learn new words, tell stories, practice speaking, understand messages, social skills
+                - If focus is "STEM": Activities should involve counting, numeracy, building, problem solving, understanding mechanisms, scientific thinking, forming hypothesis, creating experiments
+                - If focus is "Creativity": Activities should involve imagination, artistic expression, creative storytelling, design thinking, building, drawing, role-playing
                 - If focus is "Emotional Intelligence": Activities should help identify emotions, discuss feelings, understand character emotions, practice empathy, emotional expression
                 
                 Please provide exactly 4-6 activities that specifically target ${focus} using what you see in the image. Each activity should be age-appropriate for ${age} years old.
