@@ -311,9 +311,10 @@ const MediaLibraryInterface = () => {
     const { speak, stop, isSpeaking, error: ttsError } = useGoogleTextToSpeech();
 
     const focusChoices = [
-        { value: "Learning and Education", label: "Learning & Education", icon: <span role="img" aria-label="books">📚</span> },
+        { value: "Literacy and Communication", label: "Literacy and Communication", icon: <span role="img" aria-label="book">📚</span> },
+        { value: "STEM", label: "STEM", icon: <span role="img" aria-label="gears">⚙️</span> },
         { value: "Creativity", label: "Creativity", icon: <span role="img" aria-label="art">🎨</span> },
-        { value: "Emotion Intelligence", label: "Emotional Intelligence", icon: <span role="img" aria-label="heart">❤️</span> },
+        { value: "Emotional Intelligence", label: "Emotional Intelligence", icon: <span role="img" aria-label="heart">❤️</span> },
     ];
 
     const [oauthToken, setOauthToken] = useState(null);
@@ -1073,11 +1074,13 @@ const MediaLibraryInterface = () => {
                     IMPORTANT: Your conversation must be directly related to ${focus}. 
                     
                     For example:
-                    - If focus is "Learning and Education": Ask about educational aspects, counting, letters, learning opportunities
-                    - If focus is "Creativity": Ask about imagination, art, creative expression, what they could create
+                    - If focus is "Literacy and Communication": Ask about words, letters, reading, writing, how to express ideas, fun facts, personal experience, social skills
+                    - If focus is "STEM": Ask about counting, numeracy, how things are built, what they're made of, how they work, designing new things, scientific thinking, hypothesis, cause and effect
+                    - If focus is "Creativity": Ask about imagination, art, creative expression, what they could create, design thinking
                     - If focus is "Emotional Intelligence": Ask about feelings, emotions, how characters might feel, emotional responses
                     
-                    Start with a warm greeting and ask an engaging question that specifically relates to ${focus} based on what you see in the image. Keep the conversation interactive and educational within the ${focus} theme.`;
+                    Start with a warm greeting and ask an engaging question that specifically relates to ${focus} based on what you see in the image. Keep the conversation interactive and educational within the ${focus} theme.
+                    Keep your response very short and simple, suitable for a ${age}-year-old. Focus on one clear question/prompt.`;
                 } else {
                     const conversationHistory = apiResponses.map(r => {
                         const isUser = r.type === 'user_message' || r.sender === 'user';
@@ -1097,18 +1100,21 @@ const MediaLibraryInterface = () => {
                     Child's age: ${age} years old
                     Focus: ${focus}
                     
-                    Please respond naturally while keeping the conversation engaging, educational, and specifically focused on ${focus}.`;
+                    Please respond naturally while keeping the conversation engaging, educational, and specifically focused on ${focus}.
+                    Keep your response very short and simple, suitable for a ${age}-year-old.`;
                 }
             } else {
                 prompt = `Create 4-6 engaging activity suggestions based on this image for a ${age}-year-old child with a PRIMARY focus on ${focus}. 
                 
                 IMPORTANT: All activities must be directly related to ${focus}:
                 
-                - If focus is "Learning and Education": Activities should teach concepts like counting, letters, shapes, colors, problem-solving, observation skills
-                - If focus is "Creativity": Activities should involve imagination, artistic expression, creative storytelling, building, drawing, role-playing
+                - If focus is "Literacy and Communication": Activities should help identify words,learn new words, tell stories, practice speaking, understand messages, social skills
+                - If focus is "STEM": Activities should involve counting, numeracy, building, problem solving, understanding mechanisms, scientific thinking, forming hypothesis, creating experiments
+                - If focus is "Creativity": Activities should involve imagination, artistic expression, creative storytelling, design thinking, building, drawing, role-playing
                 - If focus is "Emotional Intelligence": Activities should help identify emotions, discuss feelings, understand character emotions, practice empathy, emotional expression
                 
                 Please provide exactly 4-6 activities that specifically target ${focus} using what you see in the image. Each activity should be age-appropriate for ${age} years old.
+                Please keep each activity short and simple, suitable for a ${age}-year-old.
                 
                 Format each activity with a clear title and detailed description. Use this exact format:
 
