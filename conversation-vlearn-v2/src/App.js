@@ -1,6 +1,6 @@
 import React from 'react';
 import { useState, useEffect, useRef } from "react";
-import { Upload, X, MessageCircle, Lightbulb, Send, Camera, Settings, Trash2, Plus, Mic, MicOff, Type, Volume2, AlertCircle, Eye, Palette, Hash, HelpCircle } from "lucide-react";
+import { Upload, X, MessageCircle, Lightbulb, Send, Camera, Settings, Trash2, Plus, Mic, MicOff, Type, Volume2, AlertCircle, Eye, Palette, Hash, HelpCircle, RefreshCw } from "lucide-react";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
 // Enhanced Google Cloud Speech-to-Text Hook with better error handling
@@ -185,7 +185,6 @@ const useGoogleTextToSpeech = () => {
   
     return { speak, stop, isSpeaking, error };
   };
-  
 
 const MediaLibraryInterface = () => {
     // 🔑 API KEYS - Read from environment variables
@@ -205,6 +204,8 @@ const MediaLibraryInterface = () => {
     const [selectedActivityCard, setSelectedActivityCard] = useState(null);
     const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
     const [expandedCards, setExpandedCards] = useState(new Set());
+    const [isLoadingMedia, setIsLoadingMedia] = useState(false);
+    const [isUploadingMedia, setIsUploadingMedia] = useState(false);
     
     // New state for current active AI response in voice mode
     const [currentAIResponse, setCurrentAIResponse] = useState('');
@@ -219,10 +220,9 @@ const MediaLibraryInterface = () => {
         { value: "Emotion Intelligence", label: "Emotional Intelligence", icon: <span role="img" aria-label="heart">❤️</span> },
     ];
 
-    // Load saved data on component mount
+    // Load saved conversations and media on component mount
     useEffect(() => {
         const savedConversations = localStorage.getItem('ai-media-conversations');
-
         if (savedConversations) {
             try {
                 setResponses(JSON.parse(savedConversations));
@@ -231,6 +231,8 @@ const MediaLibraryInterface = () => {
             }
         }
         
+        // Load media files from cloud
+        loadMediaFiles();
     }, []);
 
     // Save conversations to localStorage whenever they change
@@ -239,6 +241,119 @@ const MediaLibraryInterface = () => {
             localStorage.setItem('ai-media-conversations', JSON.stringify(apiResponses));
         }
     }, [apiResponses]);
+
+    // 🌐 CLOUD STORAGE FUNCTIONS
+
+    // Load media files from cloud storage
+    const loadMediaFiles = async () => {
+        setIsLoadingMedia(true);
+        setDebugInfo('Loading media files from cloud...');
+        
+        try {
+            const response = await fetch('/api/list-media');
+            const result = await response.json();
+            
+            if (result.success) {
+                console.log('✅ Loaded media files:', result.files.length);
+                setMediaFiles(result.files);
+                setDebugInfo(`Loaded ${result.files.length} media files from cloud`);
+            } else {
+                console.error('❌ Failed to load media files:', result.error);
+                setDebugInfo(`Failed to load media: ${result.error}`);
+            }
+        } catch (error) {
+            console.error('❌ Network error loading media:', error);
+            setDebugInfo(`Network error: ${error.message}`);
+        } finally {
+            setIsLoadingMedia(false);
+        }
+    };
+
+    // Upload media files to cloud storage
+    const uploadMediaToCloud = async (files) => {
+        setIsUploadingMedia(true);
+        setDebugInfo('Uploading media files to cloud...');
+        
+        const uploadedFiles = [];
+        
+        for (const file of files) {
+            try {
+                // Convert file to base64
+                const base64Data = await new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = () => resolve(reader.result.split(',')[1]);
+                    reader.onerror = reject;
+                    reader.readAsDataURL(file);
+                });
+
+                // Upload to cloud
+                const response = await fetch('/api/upload-media', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        filename: file.name,
+                        fileData: base64Data,
+                        fileType: file.type,
+                        fileSize: file.size,
+                    }),
+                });
+
+                const result = await response.json();
+                
+                if (result.success) {
+                    console.log('✅ Uploaded file:', result.file.name);
+                    uploadedFiles.push(result.file);
+                } else {
+                    console.error('❌ Upload failed:', result.error);
+                    setDebugInfo(`Upload failed: ${result.error}`);
+                }
+            } catch (error) {
+                console.error('❌ Upload error:', error);
+                setDebugInfo(`Upload error: ${error.message}`);
+            }
+        }
+        
+        if (uploadedFiles.length > 0) {
+            setMediaFiles(prev => [...uploadedFiles, ...prev]);
+            setDebugInfo(`Successfully uploaded ${uploadedFiles.length} files`);
+        }
+        
+        setIsUploadingMedia(false);
+    };
+
+    // Delete media file from cloud storage
+    const deleteMediaFromCloud = async (fileId) => {
+        setDebugInfo('Deleting media file from cloud...');
+        
+        try {
+            const response = await fetch(`/api/delete-media?fileId=${fileId}`, {
+                method: 'DELETE',
+            });
+
+            const result = await response.json();
+            
+            if (result.success) {
+                console.log('✅ Deleted file:', fileId);
+                setMediaFiles(prev => prev.filter(file => file.id !== fileId));
+                
+                // Clear selection if deleted file was selected
+                if (selectedMedia && selectedMedia.id === fileId) {
+                    setSelectedMedia(null);
+                    setResponses([]);
+                }
+                
+                setDebugInfo('File deleted successfully');
+            } else {
+                console.error('❌ Delete failed:', result.error);
+                setDebugInfo(`Delete failed: ${result.error}`);
+            }
+        } catch (error) {
+            console.error('❌ Delete error:', error);
+            setDebugInfo(`Delete error: ${error.message}`);
+        }
+    };
 
     // Auto-download conversation as JSON file ONLY on browser refresh/close
     useEffect(() => {
@@ -283,21 +398,6 @@ const MediaLibraryInterface = () => {
         return () => window.removeEventListener('beforeunload', handleBeforeUnload);
     }, [apiResponses, selectedMedia, age, focus, mode, conversationType]);
 
-    // Save media files to localStorage whenever they change (exclude File objects)
-    useEffect(() => {
-        if (mediaFiles.length > 0) {
-            // Only save metadata, not the actual File objects
-            const mediaMetadata = mediaFiles.map(file => ({
-                id: file.id,
-                name: file.name,
-                url: file.url,
-                type: file.type || 'image/jpeg',
-                size: file.size || 0
-            }));
-            localStorage.setItem('ai-media-files', JSON.stringify(mediaMetadata));
-        }
-    }, [mediaFiles]);
-
     // Function to manually save conversation as JSON file
     const saveConversationToFile = () => {
         if (apiResponses.length === 0) return;
@@ -337,57 +437,51 @@ const MediaLibraryInterface = () => {
     };
 
     // Function to save selected image
-    const saveImageToFile = () => {
+    const saveImageToFile = async () => {
         if (!selectedMedia) return;
         
-        const link = document.createElement('a');
-        link.href = selectedMedia.url;
-        link.download = selectedMedia.name;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
+        try {
+            // Download image from cloud URL
+            const response = await fetch(selectedMedia.url);
+            const blob = await response.blob();
+            
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = selectedMedia.name;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+        } catch (error) {
+            console.error('Error downloading image:', error);
+            setDebugInfo(`Error downloading image: ${error.message}`);
+        }
     };
     
     const uploadMedia = (e) => {
         const files = e.target.files;
         if (!files || files.length === 0) return;
         
-        const newFiles = Array.from(files).map(file => {
-            // Validate file type
+        const validFiles = Array.from(files).filter(file => {
             if (!file.type.startsWith('image/')) {
                 console.warn('Skipping non-image file:', file.name);
-                return null;
+                return false;
             }
-            
-            return {
-                id: file.name + Date.now(),
-                file: file, // Keep the original File object
-                url: URL.createObjectURL(file),
-                name: file.name,
-                type: file.type,
-                size: file.size
-            };
-        }).filter(Boolean); // Remove null entries
+            return true;
+        });
 
-        if (newFiles.length > 0) {
-            setMediaFiles(prev => [...prev, ...newFiles]);
+        if (validFiles.length > 0) {
+            uploadMediaToCloud(validFiles);
         }
         e.target.value = '';
     };
 
     const deleteMedia = (fileId) => {
-        setMediaFiles(prev => prev.filter(file => file.id !== fileId));
-        if(selectedMedia && selectedMedia.id === fileId) {
-            setSelectedMedia(null);
-            setResponses([]);
-        }
+        deleteMediaFromCloud(fileId);
     };
  
     const selectMedia = (file) => {
-        if (file.needsReupload || !file.file) {
-            alert('This image needs to be re-uploaded. Please drag and drop or upload it again to use with AI analysis.');
-            return;
-        }
         setSelectedMedia(file);
         setResponses([]);
         setInput('');
@@ -559,39 +653,27 @@ const MediaLibraryInterface = () => {
     };
     
     //converts image to pass into gemini with error handling
-    const convertImage = async (file) => {
-        if (!file) {
-            throw new Error('No file provided for conversion');
-        }
-        
-        if (!(file instanceof File) && !(file instanceof Blob)) {
-            throw new Error('Invalid file type - must be a File or Blob object');
-        }
-
+    const convertImageFromUrl = async (imageUrl) => {
         try {
-            const convertedImage = new Promise((resolve, reject) => {
-                const reader = new FileReader();
-                reader.onload = () => {
-                    try {
-                        const result = reader.result.split(',')[1];
-                        resolve(result);
-                    } catch (error) {
-                        reject(new Error('Failed to process file data'));
-                    }
-                };
-                reader.onerror = () => reject(new Error('Failed to read file'));
-                reader.readAsDataURL(file);
-            });
+            console.log('🔄 Fetching image from URL:', imageUrl);
+            const response = await fetch(imageUrl);
             
-            const base64Data = await convertedImage;
+            if (!response.ok) {
+                throw new Error(`Failed to fetch image: ${response.status}`);
+            }
+            
+            const blob = await response.blob();
+            const buffer = await blob.arrayBuffer();
+            const base64Data = btoa(String.fromCharCode(...new Uint8Array(buffer)));
+            
             return {
                 inlineData: {
                     data: base64Data,
-                    mimeType: file.type || 'image/jpeg'
+                    mimeType: blob.type || 'image/jpeg'
                 }
             };
         } catch (error) {
-            console.error('Error converting image:', error);
+            console.error('Error converting image from URL:', error);
             throw new Error(`Image conversion failed: ${error.message}`);
         }
     };
@@ -626,9 +708,9 @@ const MediaLibraryInterface = () => {
             const ai = new GoogleGenerativeAI(GEMINI_API_KEY);
             const model = ai.getGenerativeModel({ model: "gemini-2.0-flash-exp" });
             
-            console.log('🤖 Converting image...');
-            setDebugInfo('Converting image...');
-            const image = await convertImage(selectedMedia.file);
+            console.log('🤖 Converting image from cloud URL...');
+            setDebugInfo('Converting image from cloud...');
+            const image = await convertImageFromUrl(selectedMedia.url);
             
             let prompt;
             
@@ -783,13 +865,10 @@ const MediaLibraryInterface = () => {
 
     const clearAllData = () => {
         setResponses([]);
-        setMediaFiles([]);
-        setSelectedMedia(null);
         setCurrentAIResponse(''); // Clear current AI response
         setShowChatHistory(false); // Reset chat history visibility
         localStorage.removeItem('ai-media-conversations');
-        localStorage.removeItem('ai-media-files');
-        setDebugInfo('All data cleared');
+        setDebugInfo('Local data cleared (cloud media preserved)');
     };
 
     // New state for managing chat history visibility in voice mode
@@ -1061,6 +1140,9 @@ const MediaLibraryInterface = () => {
                         <div className={`flex items-center gap-1 ${GOOGLE_CLOUD_API_KEY ? 'text-green-600' : 'text-red-600'}`}>
                             {GOOGLE_CLOUD_API_KEY ? '✅' : '❌'} Google Cloud API
                         </div>
+                        <div className="flex items-center gap-1 text-blue-600">
+                            ☁️ Vercel Blob Storage
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1123,11 +1205,6 @@ const MediaLibraryInterface = () => {
                                             </div>
                                             <div className="mt-3">
                                                 <p className="text-sm text-gray-600 truncate">{selectedMedia.name}</p>
-                                                {selectedMedia.needsReupload && (
-                                                    <div className="mt-2 p-2 bg-orange-50 border border-orange-200 rounded text-xs text-orange-700">
-                                                        <span role="img" aria-label="warning">⚠️</span> This image needs to be re-uploaded for AI analysis
-                                                    </div>
-                                                )}
                                             </div>
                                         </>
                                     ) : (
@@ -1288,11 +1365,6 @@ const MediaLibraryInterface = () => {
                                         </div>
                                         <div className="mt-3">
                                             <p className="text-sm text-gray-600 truncate">{selectedMedia.name}</p>
-                                            {selectedMedia.needsReupload && (
-                                                <div className="mt-2 p-2 bg-orange-50 border border-orange-200 rounded text-xs text-orange-700">
-                                                    <span role="img" aria-label="warning">⚠️</span> This image needs to be re-uploaded for AI analysis
-                                                </div>
-                                            )}
                                         </div>
                                     </>
                                 ) : (
@@ -1420,9 +1492,20 @@ const MediaLibraryInterface = () => {
                                 </h3>
                                 
                                 <label className="relative group cursor-pointer">
-                                    <div className="border-2 border-dashed border-purple-300 rounded-lg p-4 text-center transition-all duration-200 hover:border-purple-400 hover:bg-purple-50">
-                                        <Plus className="w-6 h-6 text-purple-400 mx-auto mb-2" />
-                                        <p className="text-purple-600 font-medium text-xs">Click to upload</p>
+                                    <div className={`border-2 border-dashed border-purple-300 rounded-lg p-4 text-center transition-all duration-200 hover:border-purple-400 hover:bg-purple-50 ${
+                                        isUploadingMedia ? 'opacity-50 pointer-events-none' : ''
+                                    }`}>
+                                        {isUploadingMedia ? (
+                                            <>
+                                                <div className="animate-spin w-6 h-6 border-2 border-purple-600 border-t-transparent rounded-full mx-auto mb-2"></div>
+                                                <p className="text-purple-600 font-medium text-xs">Uploading...</p>
+                                            </>
+                                        ) : (
+                                            <>
+                                                <Plus className="w-6 h-6 text-purple-400 mx-auto mb-2" />
+                                                <p className="text-purple-600 font-medium text-xs">Click to upload</p>
+                                            </>
+                                        )}
                                     </div>
                                     <input 
                                         type="file" 
@@ -1430,6 +1513,7 @@ const MediaLibraryInterface = () => {
                                         multiple 
                                         onChange={uploadMedia}
                                         className="hidden"
+                                        disabled={isUploadingMedia}
                                     />
                                 </label>
                             </div>
@@ -1439,14 +1523,25 @@ const MediaLibraryInterface = () => {
                                 <h3 className="text-sm font-semibold text-gray-900 mb-3 flex items-center gap-2">
                                     <Camera className="w-4 h-4 text-purple-600" />
                                     Media Library ({mediaFiles.length})
+                                    <button
+                                        onClick={loadMediaFiles}
+                                        disabled={isLoadingMedia}
+                                        className="ml-auto p-1 hover:bg-gray-200 rounded transition-all"
+                                        title="Refresh media library"
+                                    >
+                                        <RefreshCw className={`w-3 h-3 text-gray-500 ${isLoadingMedia ? 'animate-spin' : ''}`} />
+                                    </button>
                                 </h3>
                                 
-                                {mediaFiles.length === 0 ? (
+                                {isLoadingMedia ? (
+                                    <div className="flex items-center justify-center py-8">
+                                        <div className="animate-spin w-6 h-6 border-2 border-purple-600 border-t-transparent rounded-full"></div>
+                                    </div>
+                                ) : mediaFiles.length === 0 ? (
                                     <div className="text-center py-4 text-gray-500">
                                         <p className="text-xs">No images uploaded</p>
                                     </div>
                                 ) : (
-
                                     <div className="grid grid-cols-3 gap-2 max-h-[250px] overflow-y-auto">
                                         {mediaFiles.map((file) => (
                                             <div 
@@ -1455,21 +1550,14 @@ const MediaLibraryInterface = () => {
                                                     selectedMedia?.id === file.id 
                                                         ? 'ring-2 ring-purple-400 ring-offset-1' 
                                                         : 'hover:scale-105'
-                                                } ${file.needsReupload ? 'opacity-50' : ''}`}
-                                                onClick={() => !file.needsReupload && selectMedia(file)}
+                                                }`}
+                                                onClick={() => selectMedia(file)}
                                             >
                                                 <img 
                                                     src={file.url} 
                                                     alt={file.name} 
                                                     className="w-full h-16 object-cover"
                                                 />
-                                                {file.needsReupload && (
-                                                    <div className="absolute inset-0 bg-red-500 bg-opacity-20 flex items-center justify-center">
-                                                        <div className="text-xs text-red-700 font-bold text-center p-1">
-                                                            Re-upload
-                                                        </div>
-                                                    </div>
-                                                )}
                                                 <button
                                                     onClick={(e) => {
                                                         e.stopPropagation();
@@ -1620,7 +1708,7 @@ const MediaLibraryInterface = () => {
                                         onClick={clearAllData}
                                         className="w-full px-3 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg text-xs font-medium transition-all duration-200"
                                     >
-                                        🗑️ Clear All
+                                        🗑️ Clear Local
                                     </button>
                                 </div>
                             </div>
