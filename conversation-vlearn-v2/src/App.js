@@ -1,200 +1,294 @@
 import React from 'react';
-import { useState, useEffect, useRef } from "react";
-import { Upload, X, MessageCircle, Lightbulb, Send, Camera, Settings, Trash2, Plus, Mic, MicOff, Type, Volume2, AlertCircle, Eye, Palette, Hash, HelpCircle } from "lucide-react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { Upload, X, MessageCircle, Lightbulb, Send, Camera, Settings, Trash2, Plus, Mic, MicOff, Volume2, AlertCircle, Eye } from "lucide-react";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { gapi } from 'gapi-script';
+
+export const createOrFindFolder = async (folderName = 'Images') => {
+    try {
+        // First, check if folder already exists
+        const response = await gapi.client.drive.files.list({
+            q: `name='${folderName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+            fields: 'files(id, name)',
+        });
+
+        if (response.result.files.length > 0) {
+            return response.result.files[0].id;
+        }
+
+        // Create folder if it doesn't exist
+        const folderResponse = await gapi.client.drive.files.create({
+            resource: {
+                name: folderName,
+                mimeType: 'application/vnd.google-apps.folder',
+            },
+        });
+
+        return folderResponse.result.id;
+    } catch (error) {
+        console.error('Error creating/finding folder:', error);
+        throw error;
+    }
+};
+
+export const uploadImageToDrive = async (file, folderId, fileName = null) => {
+    try {
+        const metadata = {
+            name: fileName || file.name,
+            parents: [folderId],
+        };
+
+        // Convert file to base64
+        const fileReader = new FileReader();
+        const base64Data = await new Promise((resolve, reject) => {
+            fileReader.onload = () => resolve(fileReader.result.split(',')[1]);
+            fileReader.onerror = reject;
+            fileReader.readAsDataURL(file);
+        });
+
+        const response = await gapi.client.request({
+            path: 'https://www.googleapis.com/upload/drive/v3/files',
+            method: 'POST',
+            params: {
+                uploadType: 'multipart',
+            },
+            headers: {
+                'Content-Type': 'multipart/related; boundary="foo_bar_baz"',
+            },
+            body: `--foo_bar_baz\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(metadata)}\r\n--foo_bar_baz\r\nContent-Type: ${file.type}\r\nContent-Transfer-Encoding: base64\r\n\r\n${base64Data}\r\n--foo_bar_baz--`,
+        });
+
+        return response.result;
+    } catch (error) {
+        console.error('Error uploading file:', error);
+        throw error;
+    }
+};
+
+export const listDriveImages = async (folderId) => {
+    try {
+        const response = await gapi.client.drive.files.list({
+            q: `'${folderId}' in parents and mimeType contains 'image/' and trashed = false`,
+            fields: 'files(id, name, mimeType, size, thumbnailLink, createdTime, webContentLink)',
+        });
+        return response.result.files || [];
+    } catch (error) {
+        console.error('Error fetching Drive images:', error);
+        return [];
+    }
+};
+
+// Delete image from Google Drive
+export const deleteImageFromDrive = async (fileId) => {
+    try {
+        await gapi.client.drive.files.delete({
+            fileId: fileId,
+        });
+        return true;
+    } catch (error) {
+        console.error('Error deleting image:', error);
+        throw error;
+    }
+};
+
+// Get image thumbnail URL
+export const getImageThumbnail = (file) => {
+    return file.thumbnailLink || file.webContentLink;
+};
 
 // Enhanced Google Cloud Speech-to-Text Hook with better error handling
 const useGoogleSpeechToText = () => {
-  const [isListening, setIsListening] = useState(false);
-  const [transcript, setTranscript] = useState('');
-  const [error, setError] = useState(null);
-  const [mediaRecorder, setMediaRecorder] = useState(null);
+    const [isListening, setIsListening] = useState(false);
+    const [transcript, setTranscript] = useState('');
+    const [error, setError] = useState(null);
+    const [mediaRecorder, setMediaRecorder] = useState(null);
 
-  const startListening = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
-      const chunks = []; 
-  
-      setMediaRecorder(recorder);
-      setIsListening(true);
-      setError(null);
-  
-      recorder.ondataavailable = (event) => {
-        chunks.push(event.data);
-      };
-  
-      recorder.onstop = async () => {
-        const audioBlob = new Blob(chunks, { type: 'audio/webm' }); 
-        await transcribeAudio(audioBlob);
-        stream.getTracks().forEach((track) => track.stop());
-      };
-  
-      recorder.start();
-    } catch (err) {
-      setError(`Microphone access denied: ${err.message}`);
-      setIsListening(false);
-    }
-  };
+    const startListening = async () => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const recorder = new MediaRecorder(stream);
+            const chunks = [];
 
-  const stopListening = () => {
-    console.log('🎤 Stopping recording...');
-    if (mediaRecorder) {
-      mediaRecorder.stop();
-      setIsListening(false);
-    }
-  };
+            setMediaRecorder(recorder);
+            setIsListening(true);
+            setError(null);
 
-  const transcribeAudio = async (audioBlob) => {
-    const apiKey = process.env.REACT_APP_GOOGLE_CLOUD_API_KEY;
-    
-    if (!apiKey) {
-      setError('Google Cloud API key not found. Check your .env file.');
-      console.error('❌ Google Cloud API key missing');
-      return;
-    }
+            recorder.ondataavailable = (event) => {
+                chunks.push(event.data);
+            };
 
-    try {
-      console.log('🔄 Converting audio to base64...');
-      const reader = new FileReader();
-      reader.readAsDataURL(audioBlob);
-      reader.onloadend = async () => {
-        const base64Audio = reader.result.split(',')[1];
-        console.log('🔄 Audio converted, calling Google Cloud Speech API...');
-        
-        const response = await fetch('https://speech.googleapis.com/v1/speech:recognize?key=' + apiKey, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            config: {
-              encoding: 'WEBM_OPUS',
-              sampleRateHertz: 48000,
-              languageCode: 'en-US',
-            },
-            audio: {
-              content: base64Audio,
-            },
-          }),
-        });
+            recorder.onstop = async () => {
+                const audioBlob = new Blob(chunks, { type: 'audio/webm' });
+                await transcribeAudio(audioBlob);
+                stream.getTracks().forEach((track) => track.stop());
+            };
 
-        console.log('🔄 Speech API response status:', response.status);
-        const result = await response.json();
-        console.log('🔄 Speech API response:', result);
-
-        if (result.results && result.results[0]) {
-          const transcribedText = result.results[0].alternatives[0].transcript;
-          console.log('✅ Transcription successful:', transcribedText);
-          setTranscript(transcribedText);
-        } else {
-          console.warn('⚠️ No transcription results');
-          setError('No speech detected. Try speaking louder or closer to the microphone.');
+            recorder.start();
+        } catch (err) {
+            setError(`Microphone access denied: ${err.message}`);
+            setIsListening(false);
         }
-      };
-    } catch (err) {
-      console.error('❌ Transcription error:', err);
-      setError(`Transcription failed: ${err.message}`);
-    }
-  };
+    };
 
-  const resetTranscript = () => setTranscript('');
+    const stopListening = () => {
+        console.log('🎤 Stopping recording...');
+        if (mediaRecorder) {
+            mediaRecorder.stop();
+            setIsListening(false);
+        }
+    };
 
-  return { isListening, transcript, error, startListening, stopListening, resetTranscript };
+    const transcribeAudio = async (audioBlob) => {
+        const apiKey = process.env.REACT_APP_GOOGLE_CLOUD_API_KEY;
+
+        if (!apiKey) {
+            setError('Google Cloud API key not found. Check your .env file.');
+            console.error('❌ Google Cloud API key missing');
+            return;
+        }
+
+        try {
+            console.log('🔄 Converting audio to base64...');
+            const reader = new FileReader();
+            reader.readAsDataURL(audioBlob);
+            reader.onloadend = async () => {
+                const base64Audio = reader.result.split(',')[1];
+                console.log('🔄 Audio converted, calling Google Cloud Speech API...');
+
+                const response = await fetch('https://speech.googleapis.com/v1/speech:recognize?key=' + apiKey, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        config: {
+                            encoding: 'WEBM_OPUS',
+                            sampleRateHertz: 48000,
+                            languageCode: 'en-US',
+                        },
+                        audio: {
+                            content: base64Audio,
+                        },
+                    }),
+                });
+
+                console.log('🔄 Speech API response status:', response.status);
+                const result = await response.json();
+                console.log('🔄 Speech API response:', result);
+
+                if (result.results && result.results[0]) {
+                    const transcribedText = result.results[0].alternatives[0].transcript;
+                    console.log('✅ Transcription successful:', transcribedText);
+                    setTranscript(transcribedText);
+                } else {
+                    console.warn('⚠️ No transcription results');
+                    setError('No speech detected. Try speaking louder or closer to the microphone.');
+                }
+            };
+        } catch (err) {
+            console.error('❌ Transcription error:', err);
+            setError(`Transcription failed: ${err.message}`);
+        }
+    };
+
+    const resetTranscript = () => setTranscript('');
+
+    return { isListening, transcript, error, startListening, stopListening, resetTranscript };
 };
 
 // Enhanced Google Cloud Text-to-Speech Hook with better error handling
 const useGoogleTextToSpeech = () => {
     const [isSpeaking, setIsSpeaking] = useState(false);
     const [error, setError] = useState(null);
-    const audioRef = useRef(null);  
-  
+    const audioRef = useRef(null);
+
     const speak = async (text) => {
-      const apiKey = process.env.REACT_APP_GOOGLE_CLOUD_API_KEY;
-  
-      if (!apiKey) {
-        setError('Google Cloud API key not found. Check your .env file.');
-        console.error('❌ Google Cloud API key missing for TTS');
-        return;
-      }
-  
-      try {
-        setIsSpeaking(true);
-        setError(null);
-  
-        const response = await fetch(
-          'https://texttospeech.googleapis.com/v1/text:synthesize?key=' + apiKey,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              input: { text },
-              voice: {
-                languageCode: 'en-US',
-                name: 'en-US-Wavenet-F',
-                ssmlGender: 'FEMALE',
-              },
-              audioConfig: { audioEncoding: 'MP3' },
-            }),
-          }
-        );
-  
-        const result = await response.json();
-  
-        if (result.audioContent) {
-          // If an audio is already playing, stop it first
-          if (audioRef.current) {
-            audioRef.current.pause();
-            audioRef.current = null;
-          }
-  
-          const audio = new Audio(`data:audio/mp3;base64,${result.audioContent}`);
-          audioRef.current = audio;
-  
-          audio.onended = () => {
-            setIsSpeaking(false);
-            audioRef.current = null;
-          };
-  
-          audio.onerror = (err) => {
-            setError('Audio playback failed');
-            setIsSpeaking(false);
-            audioRef.current = null;
-            console.error('🔊 Audio playback error:', err);
-          };
-  
-          await audio.play();
-        } else {
-          setError('Text-to-speech failed: No audio content received');
-          setIsSpeaking(false);
+        const apiKey = process.env.REACT_APP_GOOGLE_CLOUD_API_KEY;
+
+        if (!apiKey) {
+            setError('Google Cloud API key not found. Check your .env file.');
+            console.error('❌ Google Cloud API key missing for TTS');
+            return;
         }
-      } catch (err) {
-        setError(`Text-to-speech failed: ${err.message}`);
-        setIsSpeaking(false);
-      }
+
+        try {
+            setIsSpeaking(true);
+            setError(null);
+
+            const response = await fetch(
+                'https://texttospeech.googleapis.com/v1/text:synthesize?key=' + apiKey,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        input: { text },
+                        voice: {
+                            languageCode: 'en-US',
+                            name: 'en-US-Wavenet-F',
+                            ssmlGender: 'FEMALE',
+                        },
+                        audioConfig: { audioEncoding: 'MP3' },
+                    }),
+                }
+            );
+
+            const result = await response.json();
+
+            if (result.audioContent) {
+                // If an audio is already playing, stop it first
+                if (audioRef.current) {
+                    audioRef.current.pause();
+                    audioRef.current = null;
+                }
+
+                const audio = new Audio(`data:audio/mp3;base64,${result.audioContent}`);
+                audioRef.current = audio;
+
+                audio.onended = () => {
+                    setIsSpeaking(false);
+                    audioRef.current = null;
+                };
+
+                audio.onerror = (err) => {
+                    setError('Audio playback failed');
+                    setIsSpeaking(false);
+                    audioRef.current = null;
+                    console.error('🔊 Audio playback error:', err);
+                };
+
+                await audio.play();
+            } else {
+                setError('Text-to-speech failed: No audio content received');
+                setIsSpeaking(false);
+            }
+        } catch (err) {
+            setError(`Text-to-speech failed: ${err.message}`);
+            setIsSpeaking(false);
+        }
     };
-  
+
     const stop = () => {
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current.currentTime = 0; // Reset to start
-        audioRef.current = null;
-      }
-      setIsSpeaking(false);
+        if (audioRef.current) {
+            audioRef.current.pause();
+            audioRef.current.currentTime = 0; // Reset to start
+            audioRef.current = null;
+        }
+        setIsSpeaking(false);
     };
-  
+
     return { speak, stop, isSpeaking, error };
-  };
-  
+};
+
 
 const MediaLibraryInterface = () => {
     // 🔑 API KEYS - Read from environment variables
-    const GEMINI_API_KEY = process.env.REACT_APP_GEMINI_API_KEY;
+    const GEMINI_API_KEY = process.env.REACT_APP_GOOGLE_CLOUD_API_KEY;
     const GOOGLE_CLOUD_API_KEY = process.env.REACT_APP_GOOGLE_CLOUD_API_KEY;
+    const GOOGLE_CLIENT_ID = process.env.REACT_APP_GOOGLE_CLIENT_ID;
 
     const [mediaFiles, setMediaFiles] = useState([]);
     const [selectedMedia, setSelectedMedia] = useState(null);
-    const [age, setAge] = useState(''); 
+    const [age, setAge] = useState('');
     const [focus, setFocus] = useState('');
     const [mode, setMode] = useState('conversation');
     const [conversationType, setConversationType] = useState('text');
@@ -205,9 +299,12 @@ const MediaLibraryInterface = () => {
     const [selectedActivityCard, setSelectedActivityCard] = useState(null);
     const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
     const [expandedCards, setExpandedCards] = useState(new Set());
-    
-    // New state for current active AI response in voice mode
     const [currentAIResponse, setCurrentAIResponse] = useState('');
+
+    // Google Drive states
+    const [isGDriveConnected, setIsGDriveConnected] = useState(false);
+    const [gDriveFolderId, setGDriveFolderId] = useState(null);
+    const [driveError, setDriveError] = useState(null);
 
     // Google Cloud Voice hooks
     const { isListening, transcript, startListening, stopListening, resetTranscript, error: sttError } = useGoogleSpeechToText();
@@ -218,6 +315,231 @@ const MediaLibraryInterface = () => {
         { value: "Creativity", label: "Creativity", icon: <span role="img" aria-label="art">🎨</span> },
         { value: "Emotion Intelligence", label: "Emotional Intelligence", icon: <span role="img" aria-label="heart">❤️</span> },
     ];
+
+    const [oauthToken, setOauthToken] = useState(null);
+
+    const initGoogleDrive = async () => {
+        return new Promise((resolve, reject) => {
+            gapi.load('client', async () => {
+                try {
+                    await gapi.client.init({
+                        apiKey: process.env.REACT_APP_GOOGLE_CLOUD_API_KEY,
+                        discoveryDocs: ['https://www.googleapis.com/discovery/v1/apis/drive/v3/rest'],
+                    });
+
+                    const tokenClient = window.google.accounts.oauth2.initTokenClient({
+                        client_id: process.env.REACT_APP_GOOGLE_CLIENT_ID,
+                        scope: 'https://www.googleapis.com/auth/drive',
+                        callback: (tokenResponse) => {
+                            if (tokenResponse.error) {
+                                reject(tokenResponse);
+                            } else {
+                                gapi.client.setToken(tokenResponse);
+                                setOauthToken(tokenResponse.access_token); // Save token in state
+                                resolve(tokenResponse);
+                            }
+                        },
+                    });
+
+                    tokenClient.requestAccessToken();
+                } catch (err) {
+                    reject(err);
+                }
+            });
+        });
+    };
+
+    const createPicker = () => {
+        if (!oauthToken) {
+            alert('Please connect to Google Drive first');
+            return;
+        }
+
+        const picker = new google.picker.PickerBuilder()
+            .addView(google.picker.ViewId.DOCS_IMAGES)
+            .setOAuthToken(oauthToken)
+            .setDeveloperKey(process.env.REACT_APP_GOOGLE_CLOUD_API_KEY)
+            .setOrigin(window.location.origin)
+            .setCallback(pickerCallback)
+            .build();
+
+        picker.setVisible(true);
+    };
+
+    async function pickerCallback(data) {
+        if (data.action === google.picker.Action.PICKED) {
+            const files = data.docs; // Array of selected files
+            console.log('Files picked:', files);
+
+            // For each file, fetch blob URL and add to mediaFiles
+            for (const file of files) {
+                // Construct minimal file metadata expected by addGoogleDriveFileToMedia
+                const fileData = {
+                    id: file.id,
+                    name: file.name,
+                    type: file.mimeType,
+                    createdTime: new Date().toISOString(),
+                    source: 'google-drive',
+                    thumbnailUrl: file.iconUrl || '',
+                };
+                await addGoogleDriveFileToMedia(fileData);
+            }
+        }
+    }
+
+    useEffect(() => {
+        gapi.load('picker', () => {
+            console.log('Google Picker API loaded');
+        });
+    }, []);
+
+    function handleCredentialResponse(response) {
+        const jwt = response.credential;
+
+        // Decode JWT (this is basic, not secure for validation)
+        const base64Url = jwt.split('.')[1];
+        const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+        const payload = JSON.parse(atob(base64));
+
+        console.log('User Info:', payload); // This will include name, email, picture, etc.
+    }
+
+    const fetchImageBlob = useCallback(async (fileId) => {
+        try {
+            if (!oauthToken) throw new Error('No OAuth token');
+
+            const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+
+            const response = await fetch(url, {
+                headers: {
+                    Authorization: `Bearer ${oauthToken}`,
+                },
+            });
+
+            if (!response.ok) throw new Error('Failed to fetch file');
+
+            const blob = await response.blob();
+            return URL.createObjectURL(blob);
+        } catch (err) {
+            console.error('Failed to fetch image blob', err);
+            return null;
+        }
+    }, [oauthToken]);
+
+    const loadImagesFromDrive = useCallback(async (folderId) => {
+        console.log('⚙️ loadImagesFromDrive called', folderId);
+        try {
+            const driveImages = await listDriveImages(folderId);
+
+            const existingIds = new Set(mediaFiles.map(file => file.id));
+
+            const newImages = driveImages.filter(img => !existingIds.has(img.id));
+
+            const formattedImages = await Promise.all(
+                newImages.map(async (image) => {
+                    const blobUrl = await fetchImageBlob(image.id);
+                    return {
+                        id: image.id,
+                        name: image.name,
+                        url: blobUrl,
+                        thumbnailUrl: image.thumbnailLink,
+                        type: image.mimeType,
+                        size: parseInt(image.size) || 0,
+                        createdTime: image.createdTime,
+                        source: 'google-drive',
+                    };
+                })
+            );
+
+            setMediaFiles(prev => [...prev, ...formattedImages]);
+            console.log(`✅ Loaded ${formattedImages.length} new images from Google Drive`);
+        } catch (error) {
+            console.error('❌ Error loading images from Drive:', error);
+            setDriveError('Failed to load images from Google Drive');
+        }
+    }, [fetchImageBlob, mediaFiles]);
+
+    useEffect(() => {
+        const initializeDrive = async () => {
+            if (!GOOGLE_CLIENT_ID || isGDriveConnected) return;
+
+            try {
+                await initGoogleDrive(); // Logs into Google
+                setIsGDriveConnected(true);
+
+                const folderId = await createOrFindFolder('Images');
+                setGDriveFolderId(folderId);
+
+                await loadImagesFromDrive(folderId); // ✅ THIS IS THE KEY LINE
+                console.log('✅ Synced Google Drive folder to media library');
+            } catch (error) {
+                console.error('❌ Google Drive initialization failed:', error);
+                setDriveError('Failed to connect to Google Drive');
+            }
+        };
+
+        initializeDrive();
+    }, [GOOGLE_CLIENT_ID, isGDriveConnected, loadImagesFromDrive]);
+
+    const refreshDriveImages = async () => {
+        if (isGDriveConnected && gDriveFolderId) {
+            await loadImagesFromDrive(gDriveFolderId);
+        }
+    };
+
+    // Connect to Google Drive
+    const connectToGoogleDrive = async () => {
+        try {
+            await initGoogleDrive(GOOGLE_CLIENT_ID);
+            setIsGDriveConnected(true);
+            setDriveError(null);
+
+            const folderId = await createOrFindFolder('Images');
+            setGDriveFolderId(folderId);
+
+            await loadImagesFromDrive(folderId);
+            console.log('✅ Connected to Google Drive');
+        } catch (error) {
+            console.error('❌ Google Drive connection failed:', error);
+            setDriveError('Failed to connect to Google Drive');
+        }
+    };
+
+    useEffect(() => {
+    if (!isGDriveConnected || !gDriveFolderId) return;
+
+    const interval = setInterval(() => {
+        console.log('🔄 Auto-refreshing Drive images...');
+        loadImagesFromDrive(gDriveFolderId);
+    }, 10000); // Every 10 seconds (adjust as needed)
+
+    return () => clearInterval(interval); // Clean up on unmount
+}, [isGDriveConnected, gDriveFolderId, loadImagesFromDrive]);
+
+
+    const disconnectFromGoogleDrive = async () => {
+        try {
+            const token = gapi.client.getToken();
+            if (token) {
+                await new Promise((resolve) => {
+                    google.accounts.oauth2.revoke(token.access_token, () => {
+                        resolve();
+                    });
+                });
+                gapi.client.setToken(null);
+                setOauthToken(null);
+            }
+
+            setIsGDriveConnected(false);
+            setGDriveFolderId(null);
+            setMediaFiles([]);
+            setSelectedMedia(null);
+            setDriveError(null);
+            console.log('✅ Disconnected from Google Drive');
+        } catch (error) {
+            console.error('❌ Error disconnecting from Google Drive:', error);
+        }
+    };
 
     // Load saved data on component mount
     useEffect(() => {
@@ -230,8 +552,24 @@ const MediaLibraryInterface = () => {
                 console.error('Error loading saved conversations:', err);
             }
         }
-        
     }, []);
+
+    useEffect(() => {
+        /* global google */
+        if (window.google && !isGDriveConnected) {  // Only initialize if Google SDK loaded and not connected
+            google.accounts.id.initialize({
+                client_id: GOOGLE_CLIENT_ID,
+                callback: handleCredentialResponse,
+            });
+
+            google.accounts.id.renderButton(
+                document.getElementById('googleSignInDiv'),
+                { theme: 'outline', size: 'large' }
+            );
+
+            google.accounts.id.prompt(); // Optional, shows one-tap prompt
+        }
+    }, [GOOGLE_CLIENT_ID, isGDriveConnected]);
 
     // Save conversations to localStorage whenever they change
     useEffect(() => {
@@ -240,6 +578,21 @@ const MediaLibraryInterface = () => {
         }
     }, [apiResponses]);
 
+    const addGoogleDriveFileToMedia = async (file) => {
+        const blobUrl = await fetchImageBlob(file.id); // fetchImageBlob uses OAuth and returns blob URL
+
+        if (!blobUrl) {
+            console.warn('Could not fetch Google Drive image blob for preview');
+            return;
+        }
+
+        const updatedFile = {
+            ...file,
+            url: blobUrl,   // <-- this makes the preview work in <img>
+        };
+
+        setMediaFiles(prev => [...prev, updatedFile]);
+    };
     // Auto-download conversation as JSON file ONLY on browser refresh/close
     useEffect(() => {
         const handleBeforeUnload = (e) => {
@@ -274,7 +627,7 @@ const MediaLibraryInterface = () => {
                 link.click();
                 document.body.removeChild(link);
                 URL.revokeObjectURL(url);
-                
+
                 console.log('✅ Auto-saved conversation on page unload');
             }
         };
@@ -301,7 +654,7 @@ const MediaLibraryInterface = () => {
     // Function to manually save conversation as JSON file
     const saveConversationToFile = () => {
         if (apiResponses.length === 0) return;
-        
+
         const conversationData = {
             timestamp: new Date().toISOString(),
             sessionId: Date.now(),
@@ -331,15 +684,14 @@ const MediaLibraryInterface = () => {
         link.click();
         document.body.removeChild(link);
         URL.revokeObjectURL(url);
-        
-        console.log('✅ Manual conversation download:', conversationData.totalMessages, 'messages');
+
         setDebugInfo(`Conversation downloaded: ${conversationData.totalMessages} messages`);
     };
 
     // Function to save selected image
     const saveImageToFile = () => {
         if (!selectedMedia) return;
-        
+
         const link = document.createElement('a');
         link.href = selectedMedia.url;
         link.download = selectedMedia.name;
@@ -347,18 +699,18 @@ const MediaLibraryInterface = () => {
         link.click();
         document.body.removeChild(link);
     };
-    
+
     const uploadMedia = (e) => {
         const files = e.target.files;
         if (!files || files.length === 0) return;
-        
+
         const newFiles = Array.from(files).map(file => {
             // Validate file type
             if (!file.type.startsWith('image/')) {
                 console.warn('Skipping non-image file:', file.name);
                 return null;
             }
-            
+
             return {
                 id: file.name + Date.now(),
                 file: file, // Keep the original File object
@@ -377,18 +729,35 @@ const MediaLibraryInterface = () => {
 
     const deleteMedia = (fileId) => {
         setMediaFiles(prev => prev.filter(file => file.id !== fileId));
-        if(selectedMedia && selectedMedia.id === fileId) {
+        if (selectedMedia && selectedMedia.id === fileId) {
             setSelectedMedia(null);
             setResponses([]);
         }
     };
- 
-    const selectMedia = (file) => {
-        if (file.needsReupload || !file.file) {
+
+    const selectMedia = async (file) => {
+        // Only block if file.needsReupload explicitly set
+        // or for local files, if no file object
+        if (file.needsReupload || (file.source === 'local' && !file.file)) {
             alert('This image needs to be re-uploaded. Please drag and drop or upload it again to use with AI analysis.');
             return;
         }
-        setSelectedMedia(file);
+
+        if (file.source === 'google-drive') {
+            const blobUrl = await fetchImageBlob(file.id);
+            if (blobUrl) {
+                setSelectedMedia({
+                    ...file,
+                    url: blobUrl, // Override with blob URL to use locally in img tag
+                });
+            } else {
+                // fallback to file.url or show error
+                setSelectedMedia(file);
+            }
+        } else {
+            setSelectedMedia(file);
+        }
+
         setResponses([]);
         setInput('');
     };
@@ -415,7 +784,6 @@ const MediaLibraryInterface = () => {
 
     // Voice recording functions with improved flow
     const startRecording = async () => {
-        console.log('🎤 Starting new recording - clearing all previous state');
         // Completely clear all previous state before starting new recording
         resetTranscript();
         setInput('');
@@ -427,7 +795,6 @@ const MediaLibraryInterface = () => {
     };
 
     const stopRecording = async () => {
-        console.log('🎤 Stopping current recording');
         stopListening();
         // Note: transcript will be processed in useEffect below
     };
@@ -436,7 +803,6 @@ const MediaLibraryInterface = () => {
     useEffect(() => {
         console.log('🎤 Transcript useEffect triggered:', { transcript, conversationType, isListening });
         if (transcript && conversationType === 'voice' && !isListening) {
-            console.log('🎤 Setting input to new transcript:', transcript);
             // Only update input field when recording is complete and we have a new transcript
             setInput(transcript);
         }
@@ -482,23 +848,23 @@ const MediaLibraryInterface = () => {
             .replace(/\*/g, '')   // Remove italic markdown
             .replace(/#{1,6}\s*/g, '') // Remove headers
             .replace(/[\u{1F600}-\u{1F64F}]|[\u{1F300}-\u{1F5FF}]|[\u{1F680}-\u{1F6FF}]|[\u{1F1E0}-\u{1F1FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]/gu, ''); // Remove emojis
-        
+
         const lines = cleanText.split('\n').filter(line => line.trim());
         const cards = [];
-        
+
         let currentCard = null;
-        
+
         for (let line of lines) {
             line = line.trim();
             if (!line) continue;
-            
+
             // Look for activity titles (Activity 1:, Activity 2:, etc.)
             if (line.match(/^Activity\s+\d+:/i)) {
                 // Save previous card if exists
                 if (currentCard) {
                     cards.push(currentCard);
                 }
-                
+
                 // Extract title (everything after "Activity X:")
                 const titleMatch = line.match(/^Activity\s+\d+:\s*(.+)/i);
                 currentCard = {
@@ -513,7 +879,7 @@ const MediaLibraryInterface = () => {
                 if (currentCard) {
                     cards.push(currentCard);
                 }
-                
+
                 const titleMatch = line.match(/^[\d-]+\.\s*(.+)/) || line.match(/^-\s*(.+)/);
                 currentCard = {
                     title: titleMatch ? titleMatch[1].trim() : line.trim(),
@@ -521,12 +887,12 @@ const MediaLibraryInterface = () => {
                 };
             }
         }
-        
+
         // Add last card
         if (currentCard) {
             cards.push(currentCard);
         }
-        
+
         // If no structured activities found, try to split by paragraphs
         if (cards.length === 0) {
             const paragraphs = cleanText.split('\n\n').filter(p => p.trim());
@@ -535,7 +901,7 @@ const MediaLibraryInterface = () => {
                     const sentences = paragraph.trim().split('. ');
                     const title = sentences[0] || `Activity ${index + 1}`;
                     const description = sentences.slice(1).join('. ') || sentences[0];
-                    
+
                     cards.push({
                         title: title.replace(/[.:]$/, ''),
                         description: description
@@ -543,7 +909,7 @@ const MediaLibraryInterface = () => {
                 }
             });
         }
-        
+
         // Ensure we have at least some cards
         if (cards.length === 0) {
             return [
@@ -553,17 +919,58 @@ const MediaLibraryInterface = () => {
                 }
             ];
         }
-        
+
         // Limit to 6 cards maximum
         return cards.slice(0, 6);
     };
-    
+
+    const fetchDriveImageAsBase64 = async (fileId, mimeType = 'image/jpeg') => {
+        const accessToken = gapi.client.getToken()?.access_token;
+
+        if (!accessToken) {
+            throw new Error('Missing Google API access token');
+        }
+
+        const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+            headers: {
+                Authorization: `Bearer ${accessToken}`,
+            },
+        });
+
+        if (!response.ok) {
+            throw new Error(`Failed to fetch image from Drive: ${response.statusText}`);
+        }
+
+        const blob = await response.blob();
+
+        const base64 = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+                try {
+                    const result = reader.result.split(',')[1];
+                    resolve(result);
+                } catch (err) {
+                    reject(new Error('Failed to extract base64 from image'));
+                }
+            };
+            reader.onerror = () => reject(new Error('Failed to read blob as data URL'));
+            reader.readAsDataURL(blob);
+        });
+
+        return {
+            inlineData: {
+                data: base64,
+                mimeType,
+            },
+        };
+    };
+
     //converts image to pass into gemini with error handling
     const convertImage = async (file) => {
         if (!file) {
             throw new Error('No file provided for conversion');
         }
-        
+
         if (!(file instanceof File) && !(file instanceof Blob)) {
             throw new Error('Invalid file type - must be a File or Blob object');
         }
@@ -582,7 +989,7 @@ const MediaLibraryInterface = () => {
                 reader.onerror = () => reject(new Error('Failed to read file'));
                 reader.readAsDataURL(file);
             });
-            
+
             const base64Data = await convertedImage;
             return {
                 inlineData: {
@@ -599,10 +1006,10 @@ const MediaLibraryInterface = () => {
     // 🚀 ENHANCED GEMINI API IMPLEMENTATION with user message tracking
     const getApiResponse = async (userMessage = null) => {
         const actualUserMessage = userMessage || apiInput;
-        
+
         console.log('🤖 Starting API call...');
         setDebugInfo('Starting API call...');
-        
+
         if (!selectedMedia || !age || !focus) {
             const error = 'Please select an image, enter age, and choose a focus area.';
             alert(error);
@@ -621,17 +1028,27 @@ const MediaLibraryInterface = () => {
         console.log('🤖 API key found, starting generation...');
         setDebugInfo('API key found, processing image...');
         setIsGenerating(true);
-        
+
         try {
             const ai = new GoogleGenerativeAI(GEMINI_API_KEY);
             const model = ai.getGenerativeModel({ model: "gemini-2.0-flash-exp" });
-            
+
             console.log('🤖 Converting image...');
             setDebugInfo('Converting image...');
-            const image = await convertImage(selectedMedia.file);
-            
+
+            let image;
+
+            if (selectedMedia.source === 'google-drive') {
+                // Fetch base64 from Google Drive file
+                image = await fetchDriveImageAsBase64(selectedMedia.id, selectedMedia.type || 'image/jpeg');
+            } else if (selectedMedia.file) {
+                // Local upload
+                image = await convertImage(selectedMedia.file);
+            } else {
+                throw new Error('Selected media is missing file data');
+            }
             let prompt;
-            
+
             if (mode === 'conversation') {
                 // Add user message to conversation history FIRST
                 if (actualUserMessage && apiResponses.length > 0) {
@@ -649,12 +1066,12 @@ const MediaLibraryInterface = () => {
                     };
                     setResponses(prev => [...prev, userMessageObj]);
                 }
-                
+
                 if (apiResponses.length === 0) {
                     prompt = `Begin a conversation about this image specifically focused on ${focus} for a ${age}-year-old child. 
                     
                     IMPORTANT: Your conversation must be directly related to ${focus}. 
-
+                    
                     For example:
                     - If focus is "Learning and Education": Ask about educational aspects, counting, letters, learning opportunities
                     - If focus is "Creativity": Ask about imagination, art, creative expression, what they could create
@@ -667,7 +1084,7 @@ const MediaLibraryInterface = () => {
                         const content = r.candidates?.[0]?.content?.parts?.[0]?.text || r.content || '';
                         return isUser ? `Child: ${content}` : `Assistant: ${content}`;
                     }).join('\n\n');
-                    
+
                     prompt = `Continue this conversation about the image with a strong focus on ${focus} for a ${age}-year-old child.
                     
                     IMPORTANT: Keep the conversation centered on ${focus}. Every response should relate to this focus area.
@@ -693,7 +1110,6 @@ const MediaLibraryInterface = () => {
                 
                 Please provide exactly 4-6 activities that specifically target ${focus} using what you see in the image. Each activity should be age-appropriate for ${age} years old.
                 
-
                 Format each activity with a clear title and detailed description. Use this exact format:
 
                 Activity 1: [Title focused on ${focus}]
@@ -716,20 +1132,20 @@ const MediaLibraryInterface = () => {
 
                 Do not use any special formatting marks, bold text, asterisks, or emojis. Keep the language clear and simple. Every activity must clearly relate to ${focus}.`;
             }
-            
+
             console.log('🤖 Sending request to Gemini...');
             setDebugInfo('Sending request to Gemini API...');
-            
+
             const result = await model.generateContent([prompt, image]);
             const response = result.response;
             const text = response.candidates?.[0]?.content?.parts?.[0]?.text;
-            
+
             console.log('🤖 Gemini response received:', text ? 'Success' : 'No text');
-            
+
             if (text) {
                 console.log('✅ Response successful:', text.substring(0, 100) + '...');
                 setDebugInfo('Response received successfully!');
-                
+
                 const newResponse = {
                     responseId: Date.now(),
                     timestamp: new Date().toISOString(),
@@ -742,14 +1158,14 @@ const MediaLibraryInterface = () => {
                         }
                     }]
                 };
-                
+
                 setResponses(prev => [...prev, newResponse]);
-                
+
                 // Reset expanded cards for new suggestions
                 if (mode === 'suggestion') {
                     setExpandedCards(new Set());
                 }
-                
+
                 // Auto-play response only in voice conversation mode, not for suggestions
                 if (conversationType === 'voice' && mode === 'conversation') {
                     setCurrentAIResponse(text); // Set current AI response
@@ -760,10 +1176,10 @@ const MediaLibraryInterface = () => {
                 setDebugInfo('No response text received from Gemini');
                 alert('No response received from Gemini. Please try again.');
             }
-            
+
             setInput('');
             resetTranscript(); // Also reset transcript after successful API call
-            
+
         } catch (error) {
             console.error('❌ Gemini API Error:', error);
             setDebugInfo(`API Error: ${error.message}`);
@@ -798,7 +1214,6 @@ const MediaLibraryInterface = () => {
     // Function to render chat history
     const renderChatHistory = () => {
         return (
-
             <div className="space-y-3 max-h-[460px] overflow-y-auto">
                 {apiResponses.map((response, index) => (
                     <div key={response.responseId || index}>
@@ -811,7 +1226,7 @@ const MediaLibraryInterface = () => {
                                         {response.candidates?.[0]?.content?.parts?.[0]?.text || response.content}
                                     </div>
                                     <div className="text-xs opacity-75 mt-1">
-                                        {new Date(response.responseId || Date.now()).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                        {new Date(response.responseId || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                                     </div>
                                 </div>
                             </div>
@@ -825,7 +1240,7 @@ const MediaLibraryInterface = () => {
                                     </div>
                                     <div className="flex items-center justify-between mt-2">
                                         <div className="text-xs text-gray-500">
-                                            {new Date(response.responseId || Date.now()).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                            {new Date(response.responseId || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                                         </div>
                                         <button
                                             onClick={() => playResponse(response.candidates?.[0]?.content?.parts?.[0]?.text || response.content)}
@@ -858,7 +1273,6 @@ const MediaLibraryInterface = () => {
     // Function to render current voice transcript
     const renderCurrentVoiceTranscript = () => {
         return (
-
             <div className="space-y-4 max-h-[400px] overflow-y-auto">
                 {/* Current AI Response (when AI is speaking) */}
                 {isSpeaking && currentAIResponse && (
@@ -893,8 +1307,8 @@ const MediaLibraryInterface = () => {
                                 )}
                             </div>
                             <div className="text-gray-800 leading-relaxed text-sm">
-                                {isListening ? 
-                                    "🎤 Listening... Speak now!" : 
+                                {isListening ?
+                                    "🎤 Listening... Speak now!" :
                                     (transcript || "No speech detected")
                                 }
                             </div>
@@ -972,16 +1386,16 @@ const MediaLibraryInterface = () => {
                         const lastResponse = apiResponses[apiResponses.length - 1];
                         const responseText = lastResponse.candidates?.[0]?.content?.parts?.[0]?.text || '';
                         const suggestionCards = parseSuggestionCards(responseText);
-                        
+
                         return (
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                                 {suggestionCards.map((card, index) => {
                                     const isExpanded = expandedCards.has(index);
                                     const shouldTruncate = card.description.length > 120;
-                                    const displayDescription = isExpanded || !shouldTruncate 
-                                        ? card.description 
+                                    const displayDescription = isExpanded || !shouldTruncate
+                                        ? card.description
                                         : truncateText(card.description);
-                                    
+
                                     return (
                                         <div key={index} className="bg-gradient-to-br from-blue-50 to-purple-50 rounded-xl p-3 border border-gray-200 hover:shadow-md transition-all duration-200 cursor-pointer"
                                             onClick={() => setSelectedActivityCard(card)}>
@@ -1045,14 +1459,14 @@ const MediaLibraryInterface = () => {
                         AI Media Explorer
                     </h1>
                     <p className="text-gray-600 mt-1">Upload images and explore activities through AI-powered conversations</p>
-                    
+
                     {/* Debug Information */}
                     {debugInfo && (
                         <div className="mt-2 p-2 bg-blue-50 border border-blue-200 rounded text-sm text-blue-700">
                             <strong>Debug:</strong> {debugInfo}
                         </div>
                     )}
-                    
+
                     {/* API Key Status */}
                     <div className="mt-2 flex gap-4 text-sm">
                         <div className={`flex items-center gap-1 ${GEMINI_API_KEY ? 'text-green-600' : 'text-red-600'}`}>
@@ -1061,14 +1475,47 @@ const MediaLibraryInterface = () => {
                         <div className={`flex items-center gap-1 ${GOOGLE_CLOUD_API_KEY ? 'text-green-600' : 'text-red-600'}`}>
                             {GOOGLE_CLOUD_API_KEY ? '✅' : '❌'} Google Cloud API
                         </div>
+                        {isGDriveConnected ? (
+                            <span className="text-green-600 text-sm">✅ Google Drive</span>
+                        ) : (
+                            <span className="text-red-600 text-sm">❌ Google Drive</span>
+                        )}
+                        {isGDriveConnected ? (
+                            <>
+                                <button
+                                    onClick={refreshDriveImages}
+                                    className="text-blue-600 hover:text-blue-800 text-sm"
+                                    title="Refresh images"
+                                >
+                                    🔄
+                                </button>
+                                <button
+                                    onClick={disconnectFromGoogleDrive}
+                                    className="text-red-600 hover:text-red-800 text-sm"
+                                >
+                                    Disconnect
+                                </button>
+                            </>
+                        ) : (
+                            <button
+                                onClick={connectToGoogleDrive}
+                                className="text-blue-600 hover:text-blue-800 text-sm"
+                            >
+                                Connect Drive
+                            </button>
+                        )}
+                        <button onClick={createPicker}>📁 Open Drive</button>
+                        <button onClick={disconnectFromGoogleDrive}>🔌 Disconnect</button>
+                        {driveError && (
+                            <div className="mt-2 text-red-600 text-sm">{driveError}</div>
+                        )}
                     </div>
                 </div>
             </div>
 
             {/* Main Content Area */}
-            <div className={`max-w-7xl mx-auto p-4 transition-all duration-300 ${
-                sidebarCollapsed ? 'pb-4' : 'pb-4'
-            }`}>
+            <div className={`max-w-7xl mx-auto p-4 transition-all duration-300 ${sidebarCollapsed ? 'pb-4' : 'pb-4'
+                }`}>
                 {/* Voice Mode Layout - Image Top, Controls Below */}
                 {mode === 'conversation' && conversationType === 'voice' ? (
                     <div className="space-y-4 h-[calc(100vh-8rem)]">
@@ -1115,8 +1562,8 @@ const MediaLibraryInterface = () => {
                                     {selectedMedia ? (
                                         <>
                                             <div className="h-full rounded-xl overflow-hidden bg-gray-50 flex items-center justify-center">
-                                                <img 
-                                                    src={selectedMedia.url} 
+                                                <img
+                                                    src={selectedMedia.url}
                                                     alt={selectedMedia.name}
                                                     className="w-full h-full object-contain max-h-[60vh]"
                                                 />
@@ -1187,11 +1634,10 @@ const MediaLibraryInterface = () => {
                                             <button
                                                 onClick={isListening ? stopRecording : startRecording}
                                                 disabled={isGenerating || !selectedMedia || isSpeaking}
-                                                className={`w-full px-6 py-4 rounded-xl font-medium transition-all duration-200 flex items-center justify-center gap-3 ${
-                                                    isListening 
-                                                        ? 'bg-red-600 hover:bg-red-700 text-white animate-pulse' 
-                                                        : 'bg-purple-600 hover:bg-purple-700 text-white'
-                                                } disabled:bg-gray-400`}
+                                                className={`w-full px-6 py-4 rounded-xl font-medium transition-all duration-200 flex items-center justify-center gap-3 ${isListening
+                                                    ? 'bg-red-600 hover:bg-red-700 text-white animate-pulse'
+                                                    : 'bg-purple-600 hover:bg-purple-700 text-white'
+                                                    } disabled:bg-gray-400`}
                                             >
                                                 {isListening ? (
                                                     <>
@@ -1205,7 +1651,7 @@ const MediaLibraryInterface = () => {
                                                     </>
                                                 )}
                                             </button>
-                                            
+
                                             {/* Action buttons row */}
                                             <div className="flex gap-2 w-full">
                                                 {/* Send button for voice mode */}
@@ -1223,7 +1669,7 @@ const MediaLibraryInterface = () => {
                                                         Send
                                                     </button>
                                                 )}
-                                                
+
                                                 {/* Stop AI speaking button */}
                                                 {isSpeaking && (
                                                     <button
@@ -1244,7 +1690,7 @@ const MediaLibraryInterface = () => {
                 ) : (
                     /* Regular Layout - Side by Side */
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 h-[calc(100vh-8rem)]">
-                        
+
                         {/* LEFT PANEL - Selected Image */}
                         <div className="bg-white rounded-2xl shadow-lg border border-gray-100 flex flex-col">
                             {/* Toggle Button Row */}
@@ -1280,8 +1726,8 @@ const MediaLibraryInterface = () => {
                                 {selectedMedia ? (
                                     <>
                                         <div className="flex-1 rounded-xl overflow-hidden bg-gray-50 flex items-center justify-center">
-                                            <img 
-                                                src={selectedMedia.url} 
+                                            <img
+                                                src={selectedMedia.url}
                                                 alt={selectedMedia.name}
                                                 className="w-full h-full object-contain"
                                             />
@@ -1411,23 +1857,23 @@ const MediaLibraryInterface = () => {
                 <div className="border-t bg-white">
                     <div className="max-w-7xl mx-auto p-4">
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                            
+
                             {/* Upload Section */}
                             <div className="bg-gray-50 rounded-xl p-4">
                                 <h3 className="text-sm font-semibold text-gray-900 mb-3 flex items-center gap-2">
                                     <Upload className="w-4 h-4 text-purple-600" />
                                     Upload Media
                                 </h3>
-                                
+
                                 <label className="relative group cursor-pointer">
                                     <div className="border-2 border-dashed border-purple-300 rounded-lg p-4 text-center transition-all duration-200 hover:border-purple-400 hover:bg-purple-50">
                                         <Plus className="w-6 h-6 text-purple-400 mx-auto mb-2" />
                                         <p className="text-purple-600 font-medium text-xs">Click to upload</p>
                                     </div>
-                                    <input 
-                                        type="file" 
-                                        accept="image/*" 
-                                        multiple 
+                                    <input
+                                        type="file"
+                                        accept="image/*"
+                                        multiple
                                         onChange={uploadMedia}
                                         className="hidden"
                                     />
@@ -1440,27 +1886,25 @@ const MediaLibraryInterface = () => {
                                     <Camera className="w-4 h-4 text-purple-600" />
                                     Media Library ({mediaFiles.length})
                                 </h3>
-                                
+
                                 {mediaFiles.length === 0 ? (
                                     <div className="text-center py-4 text-gray-500">
                                         <p className="text-xs">No images uploaded</p>
                                     </div>
                                 ) : (
-
                                     <div className="grid grid-cols-3 gap-2 max-h-[250px] overflow-y-auto">
                                         {mediaFiles.map((file) => (
-                                            <div 
-                                                key={file.id} 
-                                                className={`relative group cursor-pointer rounded-lg overflow-hidden transition-all duration-200 ${
-                                                    selectedMedia?.id === file.id 
-                                                        ? 'ring-2 ring-purple-400 ring-offset-1' 
-                                                        : 'hover:scale-105'
-                                                } ${file.needsReupload ? 'opacity-50' : ''}`}
+                                            <div
+                                                key={file.id}
+                                                className={`relative group cursor-pointer rounded-lg overflow-hidden transition-all duration-200 ${selectedMedia?.id === file.id
+                                                    ? 'ring-2 ring-purple-400 ring-offset-1'
+                                                    : 'hover:scale-105'
+                                                    } ${file.needsReupload ? 'opacity-50' : ''}`}
                                                 onClick={() => !file.needsReupload && selectMedia(file)}
                                             >
-                                                <img 
-                                                    src={file.url} 
-                                                    alt={file.name} 
+                                                <img
+                                                    src={file.url || file.thumbnailUrl}
+                                                    alt={file.name}
                                                     className="w-full h-16 object-cover"
                                                 />
                                                 {file.needsReupload && (
@@ -1491,14 +1935,14 @@ const MediaLibraryInterface = () => {
                                     <Settings className="w-4 h-4 text-purple-600" />
                                     Configuration
                                 </h3>
-                                
+
                                 <div className="space-y-3">
                                     {/* Age Input */}
                                     <div>
                                         <label className="block text-xs font-medium text-gray-700 mb-1">Child's Age</label>
-                                        <input 
-                                            type="number" 
-                                            value={age} 
+                                        <input
+                                            type="number"
+                                            value={age}
                                             onChange={(e) => setAge(e.target.value)}
                                             placeholder="Age..."
                                             className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent"
@@ -1511,10 +1955,10 @@ const MediaLibraryInterface = () => {
                                         <div className="space-y-1">
                                             {focusChoices.map((choice) => (
                                                 <label key={choice.value} className="flex items-center cursor-pointer">
-                                                    <input 
-                                                        type="radio" 
-                                                        name="focus" 
-                                                        value={choice.value} 
+                                                    <input
+                                                        type="radio"
+                                                        name="focus"
+                                                        value={choice.value}
                                                         checked={focus === choice.value}
                                                         onChange={(e) => setFocus(e.target.value)}
                                                         className="mr-2 text-purple-600"
@@ -1531,21 +1975,19 @@ const MediaLibraryInterface = () => {
                                         <div className="flex gap-1">
                                             <button
                                                 onClick={conversation}
-                                                className={`flex-1 py-1 px-2 rounded text-xs font-medium transition-all duration-200 ${
-                                                    mode === 'conversation'
-                                                        ? 'bg-purple-600 text-white'
-                                                        : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-                                                }`}
+                                                className={`flex-1 py-1 px-2 rounded text-xs font-medium transition-all duration-200 ${mode === 'conversation'
+                                                    ? 'bg-purple-600 text-white'
+                                                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                                                    }`}
                                             >
                                                 Chat
                                             </button>
                                             <button
                                                 onClick={suggestion}
-                                                className={`flex-1 py-1 px-2 rounded text-xs font-medium transition-all duration-200 ${
-                                                    mode === 'suggestion'
-                                                        ? 'bg-purple-600 text-white'
-                                                        : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-                                                }`}
+                                                className={`flex-1 py-1 px-2 rounded text-xs font-medium transition-all duration-200 ${mode === 'suggestion'
+                                                    ? 'bg-purple-600 text-white'
+                                                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                                                    }`}
                                             >
                                                 Ideas
                                             </button>
@@ -1562,11 +2004,10 @@ const MediaLibraryInterface = () => {
                                                             setCurrentAIResponse('');
                                                             setShowChatHistory(false);
                                                         }}
-                                                        className={`flex-1 py-1 px-2 rounded text-xs font-medium transition-all duration-200 ${
-                                                            conversationType === 'text'
-                                                                ? 'bg-blue-500 text-white'
-                                                                : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-                                                        }`}
+                                                        className={`flex-1 py-1 px-2 rounded text-xs font-medium transition-all duration-200 ${conversationType === 'text'
+                                                            ? 'bg-blue-500 text-white'
+                                                            : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                                                            }`}
                                                     >
                                                         Text
                                                     </button>
@@ -1577,11 +2018,10 @@ const MediaLibraryInterface = () => {
                                                             setCurrentAIResponse('');
                                                             setShowChatHistory(false);
                                                         }}
-                                                        className={`flex-1 py-1 px-2 rounded text-xs font-medium transition-all duration-200 ${
-                                                            conversationType === 'voice'
-                                                                ? 'bg-blue-500 text-white'
-                                                                : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-                                                        }`}
+                                                        className={`flex-1 py-1 px-2 rounded text-xs font-medium transition-all duration-200 ${conversationType === 'voice'
+                                                            ? 'bg-blue-500 text-white'
+                                                            : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                                                            }`}
                                                     >
                                                         Voice
                                                     </button>
@@ -1632,9 +2072,9 @@ const MediaLibraryInterface = () => {
             {/* Activity Card Modal */}
             {selectedActivityCard && (
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4"
-                     onClick={() => setSelectedActivityCard(null)}>
+                    onClick={() => setSelectedActivityCard(null)}>
                     <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[80vh] overflow-y-auto"
-                         onClick={(e) => e.stopPropagation()}>
+                        onClick={(e) => e.stopPropagation()}>
                         <div className="p-8">
                             <div className="flex justify-between items-start mb-6">
                                 <h2 className="text-2xl font-bold text-blue-600">{selectedActivityCard.title}</h2>
