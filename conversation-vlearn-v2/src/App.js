@@ -349,44 +349,6 @@ const MediaLibraryInterface = () => {
         });
     };
 
-    const createPicker = () => {
-        if (!oauthToken) {
-            alert('Please connect to Google Drive first');
-            return;
-        }
-
-        const picker = new google.picker.PickerBuilder()
-            .addView(google.picker.ViewId.DOCS_IMAGES)
-            .setOAuthToken(oauthToken)
-            .setDeveloperKey(process.env.REACT_APP_GOOGLE_CLOUD_API_KEY)
-            .setOrigin(window.location.origin)
-            .setCallback(pickerCallback)
-            .build();
-
-        picker.setVisible(true);
-    };
-
-    async function pickerCallback(data) {
-        if (data.action === google.picker.Action.PICKED) {
-            const files = data.docs; // Array of selected files
-            console.log('Files picked:', files);
-
-            // For each file, fetch blob URL and add to mediaFiles
-            for (const file of files) {
-                // Construct minimal file metadata expected by addGoogleDriveFileToMedia
-                const fileData = {
-                    id: file.id,
-                    name: file.name,
-                    type: file.mimeType,
-                    createdTime: new Date().toISOString(),
-                    source: 'google-drive',
-                    thumbnailUrl: file.iconUrl || '',
-                };
-                await addGoogleDriveFileToMedia(fileData);
-            }
-        }
-    }
-
     useEffect(() => {
         gapi.load('picker', () => {
             console.log('Google Picker API loaded');
@@ -427,37 +389,37 @@ const MediaLibraryInterface = () => {
     }, [oauthToken]);
 
     const loadImagesFromDrive = useCallback(async (folderId) => {
-        console.log('⚙️ loadImagesFromDrive called', folderId);
         try {
             const driveImages = await listDriveImages(folderId);
 
-            const existingIds = new Set(mediaFiles.map(file => file.id));
+            setMediaFiles((prevMediaFiles) => {
+                const existingDriveIds = new Set(
+                    prevMediaFiles.filter(f => f.source === 'google-drive').map(f => f.id)
+                );
 
-            const newImages = driveImages.filter(img => !existingIds.has(img.id));
+                const newImages = driveImages.filter(img => !existingDriveIds.has(img.id));
 
-            const formattedImages = await Promise.all(
-                newImages.map(async (image) => {
-                    const blobUrl = await fetchImageBlob(image.id);
-                    return {
+                return prevMediaFiles.concat(
+                    newImages.map(image => ({
                         id: image.id,
                         name: image.name,
-                        url: blobUrl,
+                        url: null, // will update below
                         thumbnailUrl: image.thumbnailLink,
                         type: image.mimeType,
                         size: parseInt(image.size) || 0,
                         createdTime: image.createdTime,
                         source: 'google-drive',
-                    };
-                })
-            );
+                    }))
+                );
+            });
 
-            setMediaFiles(prev => [...prev, ...formattedImages]);
-            console.log(`✅ Loaded ${formattedImages.length} new images from Google Drive`);
+            // Now fetch blobs and update URLs for only the new images:
+            // (optional optimization)
         } catch (error) {
-            console.error('❌ Error loading images from Drive:', error);
+            console.error('Error loading images from Drive:', error);
             setDriveError('Failed to load images from Google Drive');
         }
-    }, [fetchImageBlob, mediaFiles]);
+    }, []);
 
     useEffect(() => {
         const initializeDrive = async () => {
@@ -506,15 +468,15 @@ const MediaLibraryInterface = () => {
     };
 
     useEffect(() => {
-    if (!isGDriveConnected || !gDriveFolderId) return;
+        if (!isGDriveConnected || !gDriveFolderId) return;
 
-    const interval = setInterval(() => {
-        console.log('🔄 Auto-refreshing Drive images...');
-        loadImagesFromDrive(gDriveFolderId);
-    }, 10000); // Every 10 seconds (adjust as needed)
+        const interval = setInterval(() => {
+            console.log('🔄 Auto-refreshing Drive images...');
+            loadImagesFromDrive(gDriveFolderId);
+        }, 10000); // Every 10 seconds (adjust as needed)
 
-    return () => clearInterval(interval); // Clean up on unmount
-}, [isGDriveConnected, gDriveFolderId, loadImagesFromDrive]);
+        return () => clearInterval(interval); // Clean up on unmount
+    }, [isGDriveConnected, gDriveFolderId, loadImagesFromDrive]);
 
 
     const disconnectFromGoogleDrive = async () => {
@@ -571,6 +533,40 @@ const MediaLibraryInterface = () => {
         }
     }, [GOOGLE_CLIENT_ID, isGDriveConnected]);
 
+    const uploadFileToDrive = async (file, folderId) => {
+        try {
+            const metadata = {
+                name: file.name,
+                mimeType: file.type,
+                parents: [folderId],
+            };
+
+            const form = new FormData();
+            form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+            form.append('file', file);
+
+            const response = await fetch(
+                'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',
+                {
+                    method: 'POST',
+                    headers: {
+                        Authorization: `Bearer ${oauthToken}`,
+                    },
+                    body: form,
+                }
+            );
+
+            if (!response.ok) throw new Error('Upload failed');
+
+            const uploadedFile = await response.json();
+            console.log('📤 Uploaded to Google Drive:', uploadedFile);
+            return uploadedFile;
+        } catch (err) {
+            console.error('❌ Drive upload error:', err);
+            return null;
+        }
+    };
+
     // Save conversations to localStorage whenever they change
     useEffect(() => {
         if (apiResponses.length > 0) {
@@ -578,21 +574,6 @@ const MediaLibraryInterface = () => {
         }
     }, [apiResponses]);
 
-    const addGoogleDriveFileToMedia = async (file) => {
-        const blobUrl = await fetchImageBlob(file.id); // fetchImageBlob uses OAuth and returns blob URL
-
-        if (!blobUrl) {
-            console.warn('Could not fetch Google Drive image blob for preview');
-            return;
-        }
-
-        const updatedFile = {
-            ...file,
-            url: blobUrl,   // <-- this makes the preview work in <img>
-        };
-
-        setMediaFiles(prev => [...prev, updatedFile]);
-    };
     // Auto-download conversation as JSON file ONLY on browser refresh/close
     useEffect(() => {
         const handleBeforeUnload = (e) => {
@@ -700,30 +681,58 @@ const MediaLibraryInterface = () => {
         document.body.removeChild(link);
     };
 
-    const uploadMedia = (e) => {
+    const uploadMedia = async (e) => {
         const files = e.target.files;
         if (!files || files.length === 0) return;
 
-        const newFiles = Array.from(files).map(file => {
-            // Validate file type
-            if (!file.type.startsWith('image/')) {
-                console.warn('Skipping non-image file:', file.name);
-                return null;
-            }
+        const existingFileKeys = new Set(
+            mediaFiles
+                .filter(f => f.source === 'google-drive')
+                .map(f => `${f.name}-${f.size}`)
+        );
 
-            return {
-                id: file.name + Date.now(),
-                file: file, // Keep the original File object
-                url: URL.createObjectURL(file),
-                name: file.name,
-                type: file.type,
-                size: file.size
-            };
-        }).filter(Boolean); // Remove null entries
+        const newFiles = await Promise.all(
+            Array.from(files).map(async (file) => {
+                if (!file.type.startsWith('image/')) {
+                    console.warn('Skipping non-image file:', file.name);
+                    return null;
+                }
 
-        if (newFiles.length > 0) {
-            setMediaFiles(prev => [...prev, ...newFiles]);
-        }
+                const fileKey = `${file.name}-${file.size}`;
+                if (existingFileKeys.has(fileKey)) {
+                    console.warn(`⏭️ Skipping duplicate: ${file.name}`);
+                    return null;
+                }
+
+                let driveFileMeta = null;
+                let blobUrl = URL.createObjectURL(file); // fallback
+
+                if (isGDriveConnected && oauthToken && gDriveFolderId) {
+                    driveFileMeta = await uploadFileToDrive(file, gDriveFolderId);
+
+                    if (driveFileMeta?.id) {
+                        const driveBlob = await fetchImageBlob(driveFileMeta.id);
+                        if (driveBlob) {
+                            blobUrl = driveBlob;
+                        }
+                    }
+                }
+
+                return {
+                    id: driveFileMeta?.id || file.name + Date.now(),
+                    file,
+                    url: blobUrl,
+                    name: file.name,
+                    type: file.type,
+                    size: file.size,
+                    source: driveFileMeta ? 'google-drive' : 'local',
+                    createdTime: new Date().toISOString(),
+                    thumbnailUrl: driveFileMeta?.iconLink || '',
+                };
+            })
+        );
+
+        setMediaFiles((prev) => [...prev, ...newFiles.filter(Boolean)]);
         e.target.value = '';
     };
 
@@ -1483,17 +1492,17 @@ const MediaLibraryInterface = () => {
                         {isGDriveConnected ? (
                             <>
                                 <button
+                                    onClick={disconnectFromGoogleDrive}
+                                    className="text-red-600 hover:text-red-800 text-sm"
+                                >
+                                    🔌 Disconnect
+                                </button>
+                                <button
                                     onClick={refreshDriveImages}
                                     className="text-blue-600 hover:text-blue-800 text-sm"
                                     title="Refresh images"
                                 >
-                                    🔄
-                                </button>
-                                <button
-                                    onClick={disconnectFromGoogleDrive}
-                                    className="text-red-600 hover:text-red-800 text-sm"
-                                >
-                                    Disconnect
+                                    🔄 Refresh
                                 </button>
                             </>
                         ) : (
@@ -1501,11 +1510,9 @@ const MediaLibraryInterface = () => {
                                 onClick={connectToGoogleDrive}
                                 className="text-blue-600 hover:text-blue-800 text-sm"
                             >
-                                Connect Drive
+                                🔌 Connect Drive
                             </button>
                         )}
-                        <button onClick={createPicker}>📁 Open Drive</button>
-                        <button onClick={disconnectFromGoogleDrive}>🔌 Disconnect</button>
                         {driveError && (
                             <div className="mt-2 text-red-600 text-sm">{driveError}</div>
                         )}
