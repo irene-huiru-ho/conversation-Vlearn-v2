@@ -96,22 +96,89 @@ export const getImageThumbnail = (file) => {
     return file.thumbnailLink || file.webContentLink;
 };
 
-// Enhanced Google Cloud Speech-to-Text Hook with better error handling
+// Enhanced Google Cloud Speech-to-Text Hook with silence detection
 const useGoogleSpeechToText = () => {
     const [isListening, setIsListening] = useState(false);
     const [transcript, setTranscript] = useState('');
     const [error, setError] = useState(null);
     const [mediaRecorder, setMediaRecorder] = useState(null);
+    const [audioContext, setAudioContext] = useState(null);
+    const [analyser, setAnalyser] = useState(null);
+    const [silenceTimer, setSilenceTimer] = useState(null);
+    const [autoMode, setAutoMode] = useState(false);
 
-    const startListening = async () => {
+    // Silence detection parameters
+    const SILENCE_THRESHOLD = 0.01; // Audio level threshold for silence
+    const SILENCE_DURATION = 2000; // 2 seconds of silence to trigger auto-send
+    const MIN_SPEECH_DURATION = 1000; // Minimum 1 second of speech before allowing auto-send
+
+    const startListening = async (isAutoMode = false) => {
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             const recorder = new MediaRecorder(stream);
             const chunks = [];
+            
+            // Set up audio analysis for silence detection
+            const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const analyserNode = audioCtx.createAnalyser();
+            const source = audioCtx.createMediaStreamSource(stream);
+            source.connect(analyserNode);
+            
+            analyserNode.fftSize = 512;
+            const bufferLength = analyserNode.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
 
             setMediaRecorder(recorder);
+            setAudioContext(audioCtx);
+            setAnalyser(analyserNode);
             setIsListening(true);
             setError(null);
+            setAutoMode(isAutoMode);
+
+            let speechStartTime = null;
+            let lastSoundTime = Date.now();
+
+            // Audio level monitoring for silence detection
+            const checkAudioLevel = () => {
+                if (!analyserNode || audioCtx.state === 'closed') return;
+
+                analyserNode.getByteFrequencyData(dataArray);
+                const average = dataArray.reduce((a, b) => a + b) / bufferLength;
+                const normalizedLevel = average / 255;
+
+                if (normalizedLevel > SILENCE_THRESHOLD) {
+                    // Sound detected
+                    if (!speechStartTime) {
+                        speechStartTime = Date.now();
+                    }
+                    lastSoundTime = Date.now();
+                    
+                    // Clear any existing silence timer
+                    if (silenceTimer) {
+                        clearTimeout(silenceTimer);
+                        setSilenceTimer(null);
+                    }
+                } else if (speechStartTime && !silenceTimer && isAutoMode) {
+                    // Silence detected after speech started, start silence timer
+                    const speechDuration = Date.now() - speechStartTime;
+                    
+                    if (speechDuration >= MIN_SPEECH_DURATION) {
+                        const timer = setTimeout(() => {
+                            console.log('🔇 Auto-send triggered by silence detection');
+                            stopListening();
+                        }, SILENCE_DURATION);
+                        setSilenceTimer(timer);
+                    }
+                }
+
+                if (audioCtx.state !== 'closed') {
+                    requestAnimationFrame(checkAudioLevel);
+                }
+            };
+
+            if (isAutoMode) {
+                checkAudioLevel();
+            }
 
             recorder.ondataavailable = (event) => {
                 chunks.push(event.data);
@@ -121,18 +188,31 @@ const useGoogleSpeechToText = () => {
                 const audioBlob = new Blob(chunks, { type: 'audio/webm' });
                 await transcribeAudio(audioBlob);
                 stream.getTracks().forEach((track) => track.stop());
+                
+                // Clean up audio context
+                if (audioCtx && audioCtx.state !== 'closed') {
+                    audioCtx.close();
+                }
             };
 
             recorder.start();
         } catch (err) {
             setError(`Microphone access denied: ${err.message}`);
             setIsListening(false);
+            setAutoMode(false);
         }
     };
 
     const stopListening = () => {
         console.log('🎤 Stopping recording...');
-        if (mediaRecorder) {
+        
+        // Clear silence timer
+        if (silenceTimer) {
+            clearTimeout(silenceTimer);
+            setSilenceTimer(null);
+        }
+        
+        if (mediaRecorder && mediaRecorder.state === 'recording') {
             mediaRecorder.stop();
             setIsListening(false);
         }
@@ -193,7 +273,15 @@ const useGoogleSpeechToText = () => {
 
     const resetTranscript = () => setTranscript('');
 
-    return { isListening, transcript, error, startListening, stopListening, resetTranscript };
+    return { 
+        isListening, 
+        transcript, 
+        error, 
+        startListening, 
+        stopListening, 
+        resetTranscript,
+        autoMode
+    };
 };
 
 // Enhanced Google Cloud Text-to-Speech Hook with better error handling
@@ -281,8 +369,8 @@ const useGoogleTextToSpeech = () => {
 
 
 const MediaLibraryInterface = () => {
-    // 🔑 API KEYS - Read from environment variables
-    const GEMINI_API_KEY = process.env.REACT_APP_GOOGLE_CLOUD_API_KEY;
+    // 🔑 API KEYS - Read from environment variables - FIXED THE GEMINI KEY ISSUE
+    const GEMINI_API_KEY = process.env.REACT_APP_GEMINI_API_KEY;
     const GOOGLE_CLOUD_API_KEY = process.env.REACT_APP_GOOGLE_CLOUD_API_KEY;
     const GOOGLE_CLIENT_ID = process.env.REACT_APP_GOOGLE_CLIENT_ID;
 
@@ -301,13 +389,17 @@ const MediaLibraryInterface = () => {
     const [expandedCards, setExpandedCards] = useState(new Set());
     const [currentAIResponse, setCurrentAIResponse] = useState('');
 
+    // Autonomous voice mode states
+    const [autoVoiceMode, setAutoVoiceMode] = useState(false);
+    const [isAutoConversationActive, setIsAutoConversationActive] = useState(false);
+
     // Google Drive states
     const [isGDriveConnected, setIsGDriveConnected] = useState(false);
     const [gDriveFolderId, setGDriveFolderId] = useState(null);
     const [driveError, setDriveError] = useState(null);
 
     // Google Cloud Voice hooks
-    const { isListening, transcript, startListening, stopListening, resetTranscript, error: sttError } = useGoogleSpeechToText();
+    const { isListening, transcript, startListening, stopListening, resetTranscript, error: sttError, autoMode } = useGoogleSpeechToText();
     const { speak, stop, isSpeaking, error: ttsError } = useGoogleTextToSpeech();
 
     const focusChoices = [
@@ -485,7 +577,7 @@ const MediaLibraryInterface = () => {
             const token = gapi.client.getToken();
             if (token) {
                 await new Promise((resolve) => {
-                    google.accounts.oauth2.revoke(token.access_token, () => {
+                    window.google.accounts.oauth2.revoke(token.access_token, () => {
                         resolve();
                     });
                 });
@@ -520,17 +612,17 @@ const MediaLibraryInterface = () => {
     useEffect(() => {
         /* global google */
         if (window.google && !isGDriveConnected) {  // Only initialize if Google SDK loaded and not connected
-            google.accounts.id.initialize({
+            window.google.accounts.id.initialize({
                 client_id: GOOGLE_CLIENT_ID,
                 callback: handleCredentialResponse,
             });
 
-            google.accounts.id.renderButton(
-                document.getElementById('googleSignInDiv'),
-                { theme: 'outline', size: 'large' }
-            );
+            const signInDiv = document.getElementById('googleSignInDiv');
+            if (signInDiv) {
+                window.google.accounts.id.renderButton(signInDiv, { theme: 'outline', size: 'large' });
+            }
 
-            google.accounts.id.prompt(); // Optional, shows one-tap prompt
+            window.google.accounts.id.prompt(); // Optional, shows one-tap prompt
         }
     }, [GOOGLE_CLIENT_ID, isGDriveConnected]);
 
@@ -778,9 +870,16 @@ const MediaLibraryInterface = () => {
         setMode('conversation');
         setConversationType('text');
         setInput('');
-        setCurrentAIResponse(''); // Clear current AI response
-        setShowChatHistory(false); // Reset chat history visibility
-        resetTranscript(); // Clear any existing transcript when switching modes
+        setCurrentAIResponse('');
+        setShowChatHistory(false);
+        resetTranscript();
+        
+        // Clear auto mode states
+        setAutoVoiceMode(false);
+        setIsAutoConversationActive(false);
+        if (isListening) {
+            stopListening();
+        }
     };
 
     const suggestion = () => {
@@ -794,29 +893,66 @@ const MediaLibraryInterface = () => {
 
     // Voice recording functions with improved flow
     const startRecording = async () => {
-        // Completely clear all previous state before starting new recording
+        console.log('🎤 Starting new recording - clearing all previous state');
         resetTranscript();
         setInput('');
-        setCurrentAIResponse(''); // Clear current AI response when starting to record
-        // Add a small delay to ensure state is cleared
+        setCurrentAIResponse('');
+        
         setTimeout(async () => {
-            await startListening();
+            if (autoVoiceMode) {
+                console.log('🤖 Starting auto conversation mode');
+                setIsAutoConversationActive(true);
+                await startListening(true); // Pass true for auto mode
+            } else {
+                console.log('🎤 Starting manual recording mode');
+                await startListening(false);
+            }
         }, 100);
     };
 
     const stopRecording = async () => {
+        console.log('🎤 Stopping current recording');
+        if (autoVoiceMode) {
+            console.log('🤖 Stopping auto conversation mode');
+            setIsAutoConversationActive(false);
+        }
         stopListening();
-        // Note: transcript will be processed in useEffect below
     };
 
     // Handle voice transcript - add to conversation but don't auto-send
     useEffect(() => {
-        console.log('🎤 Transcript useEffect triggered:', { transcript, conversationType, isListening });
+        console.log('🎤 Transcript useEffect triggered:', { 
+            transcript, 
+            conversationType, 
+            isListening, 
+            autoMode,
+            autoVoiceMode,
+            isAutoConversationActive 
+        });
+        
         if (transcript && conversationType === 'voice' && !isListening) {
-            // Only update input field when recording is complete and we have a new transcript
+            console.log('🎤 Setting input to new transcript:', transcript);
             setInput(transcript);
+            
+            // Auto-send in auto mode when recording stops (silence detected)
+            if (autoVoiceMode && isAutoConversationActive && autoMode) {
+                console.log('🤖 Auto-sending message due to silence detection');
+                setTimeout(() => {
+                    getApiResponse();
+                    resetTranscript();
+                    setInput('');
+                    
+                    // Continue listening in auto mode after a brief pause
+                    setTimeout(() => {
+                        if (isAutoConversationActive) {
+                            console.log('🤖 Restarting listening in auto mode');
+                            startListening(true);
+                        }
+                    }, 1000);
+                }, 500);
+            }
         }
-    }, [transcript, conversationType, isListening]);
+    }, [transcript, conversationType, isListening, autoMode, autoVoiceMode, isAutoConversationActive]);
 
     const playResponse = (text) => {
         setCurrentAIResponse(text); // Set the current AI response being played
@@ -1078,9 +1214,9 @@ const MediaLibraryInterface = () => {
                 }
 
                 if (apiResponses.length === 0) {
-                    prompt = `Begin a conversation about this image specifically focused on ${focus} for a ${age}-year-old child. 
+                    prompt = `Start a conversation about this image specifically focused on ${focus} for a ${age}-year-old child. 
                     
-                    IMPORTANT: Your conversation must be directly related to ${focus}. 
+                    Try to make your conversation related to ${focus} when relevant. If the user asks about something else, please still reply to what they asked and gently steer the conversation back to ${focus}.
                     
                     For example:
                     - If focus is "Literacy and Communication": Ask about words, letters, reading, writing, how to express ideas, fun facts, personal experience, social skills
@@ -1088,7 +1224,10 @@ const MediaLibraryInterface = () => {
                     - If focus is "Creativity": Ask about imagination, art, creative expression, what they could create, design thinking
                     - If focus is "Emotional Intelligence": Ask about feelings, emotions, how characters might feel, emotional responses
                     
-                    Start with a warm greeting and ask an engaging question that specifically relates to ${focus} based on what you see in the image. Keep the conversation interactive and educational within the ${focus} theme.
+                    IMPORTANT: Do not use any special formatting marks, bold text, asterisks, or emojis. Keep the language clear, concise, and simple.
+
+                    Start with a warm greeting and ask an engaging question that relates to ${focus} based on what you see in the image. 
+                    Keep the conversation natural, interactive and educational within the ${focus} theme.
                     Keep your response very short and simple, suitable for a ${age}-year-old. Focus on one clear question/prompt.`;
                 } else {
                     const conversationHistory = apiResponses.map(r => {
@@ -1097,9 +1236,9 @@ const MediaLibraryInterface = () => {
                         return isUser ? `Child: ${content}` : `Assistant: ${content}`;
                     }).join('\n\n');
 
-                    prompt = `Continue this conversation about the image with a strong focus on ${focus} for a ${age}-year-old child.
+                    prompt = `Continue this conversation about the image with a focus on ${focus} for a ${age}-year-old child.
                     
-                    IMPORTANT: Keep the conversation centered on ${focus}. Every response should relate to this focus area.
+                    Try to make your conversation related to ${focus} when relevant. If the user asks about something else, please still reply to their question and gently steer the conversation back to ${focus}.
                     
                     Previous conversation:
                     ${conversationHistory}
@@ -1109,7 +1248,9 @@ const MediaLibraryInterface = () => {
                     Child's age: ${age} years old
                     Focus: ${focus}
                     
-                    Please respond naturally while keeping the conversation engaging, educational, and specifically focused on ${focus}.
+                    IMPORTANT: Do not use any special formatting marks, bold text, asterisks, or emojis. Keep the language clear, concise and simple. 
+                    
+                    Please respond naturally while keeping the conversation engaging, educational, and focused on ${focus}.
                     Keep your response very short and simple, suitable for a ${age}-year-old.`;
                 }
             } else {
@@ -1145,7 +1286,7 @@ const MediaLibraryInterface = () => {
                 Activity 6: [Title focused on ${focus}]
                 [Detailed description that specifically develops ${focus} skills]
 
-                Do not use any special formatting marks, bold text, asterisks, or emojis. Keep the language clear and simple. Every activity must clearly relate to ${focus}.`;
+                IMPORTANT: Do not use any special formatting marks, bold text, asterisks, or emojis. Keep the language clear and simple. Every activity must clearly relate to ${focus}.`;
             }
 
             console.log('🤖 Sending request to Gemini...');
@@ -1206,10 +1347,17 @@ const MediaLibraryInterface = () => {
 
     const clearConversations = () => {
         setResponses([]);
-        setCurrentAIResponse(''); // Clear current AI response
-        setShowChatHistory(false); // Reset chat history visibility
+        setCurrentAIResponse('');
+        setShowChatHistory(false);
         localStorage.removeItem('ai-media-conversations');
         setDebugInfo('Conversations cleared');
+        
+        // Clear auto mode states
+        setAutoVoiceMode(false);
+        setIsAutoConversationActive(false);
+        if (isListening) {
+            stopListening();
+        }
     };
 
     const clearAllData = () => {
@@ -1229,7 +1377,7 @@ const MediaLibraryInterface = () => {
     // Function to render chat history
     const renderChatHistory = () => {
         return (
-            <div className="space-y-3 max-h-[460px] overflow-y-auto">
+            <div className="space-y-3 max-h-[700px] overflow-y-auto">
                 {apiResponses.map((response, index) => (
                     <div key={response.responseId || index}>
                         {response.type === 'user_message' || response.sender === 'user' ? (
@@ -1285,10 +1433,143 @@ const MediaLibraryInterface = () => {
         );
     };
 
+    // Function to render voice controls with auto mode
+    const renderVoiceControls = () => {
+        return (
+            <div className="space-y-3">
+                {/* Auto Mode Toggle */}
+                <div className="bg-blue-50 border border-blue-200 rounded-xl p-3">
+                    <label className="flex items-center gap-3 cursor-pointer">
+                        <input
+                            type="checkbox"
+                            checked={autoVoiceMode}
+                            onChange={(e) => {
+                                setAutoVoiceMode(e.target.checked);
+                                if (!e.target.checked && isAutoConversationActive) {
+                                    setIsAutoConversationActive(false);
+                                    stopRecording();
+                                }
+                            }}
+                            className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
+                            disabled={isListening || isGenerating}
+                        />
+                        <div className="flex-1">
+                            <div className="font-medium text-blue-800 text-sm">Autonomous Conversation</div>
+                            <div className="text-xs text-blue-600">
+                                Automatically detect silence and send messages without manual confirmation
+                            </div>
+                        </div>
+                    </label>
+                </div>
+
+                {/* Mode Status Indicator */}
+                {autoVoiceMode && isAutoConversationActive && (
+                    <div className="bg-green-50 border border-green-200 rounded-xl p-3">
+                        <div className="flex items-center gap-2 text-green-800">
+                            <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse"></div>
+                            <span className="font-medium text-sm">Auto Conversation Active</span>
+                        </div>
+                        <div className="text-xs text-green-600 mt-1">
+                            Speak naturally - I'll detect when you're done and respond automatically
+                        </div>
+                    </div>
+                )}
+
+                {/* Main Voice Control Buttons */}
+                <div className="flex flex-col items-center gap-3">
+                    <button
+                        onClick={isListening ? stopRecording : startRecording}
+                        disabled={isGenerating || !selectedMedia || isSpeaking}
+                        className={`w-full px-6 py-4 rounded-xl font-medium transition-all duration-200 flex items-center justify-center gap-3 ${
+                            isListening 
+                                ? 'bg-red-600 hover:bg-red-700 text-white animate-pulse' 
+                                : autoVoiceMode && isAutoConversationActive
+                                ? 'bg-orange-600 hover:bg-orange-700 text-white'
+                                : 'bg-purple-600 hover:bg-purple-700 text-white'
+                        } disabled:bg-gray-400`}
+                    >
+                        {isListening ? (
+                            <>
+                                <MicOff className="w-5 h-5" />
+                                {autoVoiceMode ? 'Stop Auto Conversation' : 'Stop Recording'}
+                            </>
+                        ) : (
+                            <>
+                                <Mic className="w-5 h-5" />
+                                {autoVoiceMode ? (
+                                    isAutoConversationActive ? 'Continue Auto Chat' : 'Start Auto Conversation'
+                                ) : (
+                                    transcript ? 'Record New' : (apiResponses.length === 0 ? 'Start Voice Chat' : 'Record Message')
+                                )}
+                            </>
+                        )}
+                    </button>
+                    
+                    {/* Manual Send Button (only show in manual mode) */}
+                    {!autoVoiceMode && transcript && !isListening && !isGenerating && (
+                        <button
+                            onClick={() => {
+                                console.log('🎤 Manual sending message');
+                                getApiResponse();
+                                resetTranscript();
+                                setInput('');
+                            }}
+                            className="flex-1 px-4 py-3 bg-green-600 hover:bg-green-700 text-white rounded-xl font-medium transition-all duration-200 flex items-center justify-center gap-2 w-full"
+                        >
+                            <Send className="w-4 h-4" />
+                            Send Message
+                        </button>
+                    )}
+                    
+                    {/* Stop AI Speaking Button */}
+                    {isSpeaking && (
+                        <button
+                            onClick={stop}
+                            className="flex-1 px-4 py-3 bg-red-600 hover:bg-red-700 text-white rounded-xl font-medium transition-all duration-200 flex items-center justify-center gap-2 w-full"
+                        >
+                            <X className="w-4 h-4" />
+                            Stop AI
+                        </button>
+                    )}
+                </div>
+
+                {/* Auto Mode Instructions */}
+                {autoVoiceMode && (
+                    <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-3">
+                        <div className="text-xs text-yellow-800">
+                            <strong>Auto Mode Tips:</strong>
+                            <ul className="mt-1 ml-4 list-disc space-y-1">
+                                <li>Speak naturally and pause when finished</li>
+                                <li>2 seconds of silence will auto-send your message</li>
+                                <li>Minimum 1 second of speech required</li>
+                                <li>Click stop to end the conversation</li>
+                            </ul>
+                        </div>
+                    </div>
+                )}
+            </div>
+        );
+    };
+
     // Function to render current voice transcript
     const renderCurrentVoiceTranscript = () => {
         return (
-            <div className="space-y-4 max-h-[400px] overflow-y-auto">
+            <div className="space-y-3 max-h-[460px] overflow-y-auto">
+                {/* Auto Mode Status */}
+                {autoVoiceMode && isAutoConversationActive && (
+                    <div className="w-full">
+                        <div className="bg-gradient-to-r from-green-100 to-blue-100 rounded-2xl p-4 shadow-sm border border-green-200">
+                            <div className="flex items-center gap-2 mb-2">
+                                <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse"></div>
+                                <span className="text-sm font-medium text-green-700">Auto Conversation Mode</span>
+                            </div>
+                            <div className="text-gray-800 leading-relaxed text-sm">
+                                Listening for natural conversation... Speak when ready!
+                            </div>
+                        </div>
+                    </div>
+                )}
+
                 {/* Current AI Response (when AI is speaking) */}
                 {isSpeaking && currentAIResponse && (
                     <div className="w-full">
@@ -1312,18 +1593,23 @@ const MediaLibraryInterface = () => {
                                 {isListening ? (
                                     <>
                                         <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse"></div>
-                                        <span className="text-sm font-medium text-red-700">Recording...</span>
+                                        <span className="text-sm font-medium text-red-700">
+                                            {autoVoiceMode ? 'Listening (Auto Mode)...' : 'Recording...'}
+                                        </span>
                                     </>
                                 ) : (
                                     <>
                                         <div className="w-3 h-3 bg-blue-500 rounded-full"></div>
                                         <span className="text-sm font-medium text-blue-700">Your Message</span>
+                                        {autoVoiceMode && (
+                                            <span className="text-xs text-green-600 ml-2">(Auto-sending...)</span>
+                                        )}
                                     </>
                                 )}
                             </div>
                             <div className="text-gray-800 leading-relaxed text-sm">
-                                {isListening ?
-                                    "🎤 Listening... Speak now!" :
+                                {isListening ? 
+                                    (autoVoiceMode ? "🎤 Speak naturally... I'll detect when you're done!" : "🎤 Listening... Speak now!") : 
                                     (transcript || "No speech detected")
                                 }
                             </div>
@@ -1341,17 +1627,20 @@ const MediaLibraryInterface = () => {
                             </div>
                             <div className="text-gray-600 text-sm">
                                 Processing your message and preparing a response...
+                                {autoVoiceMode && <span className="block text-xs text-green-600 mt-1">Will continue listening after response</span>}
                             </div>
                         </div>
                     </div>
                 )}
 
                 {/* Default state when nothing is happening */}
-                {!isListening && !transcript && !isSpeaking && !isGenerating && apiResponses.length > 0 && (
+                {!isListening && !transcript && !isSpeaking && !isGenerating && apiResponses.length > 0 && !isAutoConversationActive && (
                     <div className="text-center text-gray-500 py-4">
                         <MessageCircle className="w-8 h-8 mx-auto mb-2 text-gray-300" />
                         <p className="text-sm">Ready for your next message</p>
-                        <p className="text-xs text-gray-400">Press the microphone to continue chatting</p>
+                        <p className="text-xs text-gray-400">
+                            {autoVoiceMode ? 'Click to start auto conversation' : 'Press the microphone to continue chatting'}
+                        </p>
                     </div>
                 )}
             </div>
@@ -1642,60 +1931,7 @@ const MediaLibraryInterface = () => {
 
                                 {/* Voice Controls */}
                                 <div className="p-4 border-t border-gray-200">
-                                    <div className="space-y-3">
-                                        <div className="flex flex-col items-center gap-3">
-                                            <button
-                                                onClick={isListening ? stopRecording : startRecording}
-                                                disabled={isGenerating || !selectedMedia || isSpeaking}
-                                                className={`w-full px-6 py-4 rounded-xl font-medium transition-all duration-200 flex items-center justify-center gap-3 ${isListening
-                                                    ? 'bg-red-600 hover:bg-red-700 text-white animate-pulse'
-                                                    : 'bg-purple-600 hover:bg-purple-700 text-white'
-                                                    } disabled:bg-gray-400`}
-                                            >
-                                                {isListening ? (
-                                                    <>
-                                                        <MicOff className="w-5 h-5" />
-                                                        Stop Recording
-                                                    </>
-                                                ) : (
-                                                    <>
-                                                        <Mic className="w-5 h-5" />
-                                                        {transcript ? 'Record New' : (apiResponses.length === 0 ? 'Start Voice Chat' : 'Record Message')}
-                                                    </>
-                                                )}
-                                            </button>
-
-                                            {/* Action buttons row */}
-                                            <div className="flex gap-2 w-full">
-                                                {/* Send button for voice mode */}
-                                                {transcript && !isListening && !isGenerating && (
-                                                    <button
-                                                        onClick={() => {
-                                                            console.log('🎤 Sending message and clearing state');
-                                                            getApiResponse();
-                                                            resetTranscript();
-                                                            setInput('');
-                                                        }}
-                                                        className="flex-1 px-4 py-3 bg-green-600 hover:bg-green-700 text-white rounded-xl font-medium transition-all duration-200 flex items-center justify-center gap-2"
-                                                    >
-                                                        <Send className="w-4 h-4" />
-                                                        Send
-                                                    </button>
-                                                )}
-
-                                                {/* Stop AI speaking button */}
-                                                {isSpeaking && (
-                                                    <button
-                                                        onClick={stop}
-                                                        className="flex-1 px-4 py-3 bg-red-600 hover:bg-red-700 text-white rounded-xl font-medium transition-all duration-200 flex items-center justify-center gap-2"
-                                                    >
-                                                        <X className="w-4 h-4" />
-                                                        Stop AI
-                                                    </button>
-                                                )}
-                                            </div>
-                                        </div>
-                                    </div>
+                                    {renderVoiceControls()}
                                 </div>
                             </div>
                         </div>
@@ -2016,6 +2252,12 @@ const MediaLibraryInterface = () => {
                                                             resetTranscript();
                                                             setCurrentAIResponse('');
                                                             setShowChatHistory(false);
+                                                            // Clear auto mode when switching to text
+                                                            setAutoVoiceMode(false);
+                                                            setIsAutoConversationActive(false);
+                                                            if (isListening) {
+                                                                stopListening();
+                                                            }
                                                         }}
                                                         className={`flex-1 py-1 px-2 rounded text-xs font-medium transition-all duration-200 ${conversationType === 'text'
                                                             ? 'bg-blue-500 text-white'
@@ -2039,6 +2281,15 @@ const MediaLibraryInterface = () => {
                                                         Voice
                                                     </button>
                                                 </div>
+                                                {conversationType === 'voice' && (
+                                                    <div className="mt-1 text-xs text-gray-600">
+                                                        {autoVoiceMode ? (
+                                                            <span className="text-green-600 font-medium">Auto mode enabled</span>
+                                                        ) : (
+                                                            <span>Manual mode</span>
+                                                        )}
+                                                    </div>
+                                                )}
                                             </div>
                                         )}
                                     </div>
@@ -2115,6 +2366,9 @@ const MediaLibraryInterface = () => {
                     </div>
                 </div>
             )}
+            
+            {/* Hidden div for Google Sign-In button */}
+            <div id="googleSignInDiv" style={{ display: 'none' }}></div>
         </div>
     );
 };
